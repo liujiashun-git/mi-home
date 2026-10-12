@@ -82,4 +82,64 @@ public class AsyncConfig {
 
         return executor;
     }
+
+    /**
+     * 图谱抽取——文档级任务池。
+     * <p>
+     * 一个文档一个任务：读目标块 → fan-out 到 {@link #graphChunkExecutor} 逐块抽取 → 汇总。
+     * <p>
+     * <b>为什么块级任务要另起一个池</b>：文档级任务会<b>阻塞等待</b>自己的块级子任务完成。
+     * 如果父子共用同一个池，池子被文档级任务占满后子任务排不进来，
+     * 就形成"父等子、子等父"的自死锁。两个池把等待关系和执行关系分开，
+     * 结构上杜绝这类问题（子任务还会在队列满时由父线程直接跑，保证一定有进展）。
+     */
+    @Bean("graphExtractionExecutor")
+    public Executor graphExtractionExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+
+        executor.setCorePoolSize(2);
+        executor.setMaxPoolSize(2);
+        executor.setQueueCapacity(50);
+        executor.setThreadNamePrefix("graph-extract-");
+        executor.setKeepAliveSeconds(60);
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(60);
+
+        executor.initialize();
+
+        log.info("图谱抽取线程池初始化完成");
+
+        return executor;
+    }
+
+    /**
+     * 图谱抽取——块级任务池。
+     * <p>
+     * 一个 chunk 一个任务。抽取是 per-chunk 的 LLM 调用，纯 IO 等待、
+     * 块与块之间没有任何依赖，所以并发度直接换吞吐：
+     * 线程数按"并发 LLM 调用数"设，不是按 CPU 核数设。
+     * <p>
+     * 队列满时用 CallerRunsPolicy：让调用方线程（文档级任务）自己跑这块，
+     * 宁可这一篇文档慢一点，也不丢块、不无限堆积。
+     */
+    @Bean("graphChunkExecutor")
+    public Executor graphChunkExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+
+        executor.setCorePoolSize(4);
+        executor.setMaxPoolSize(8);
+        executor.setQueueCapacity(200);
+        executor.setThreadNamePrefix("graph-chunk-");
+        executor.setKeepAliveSeconds(60);
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(60);
+
+        executor.initialize();
+
+        log.info("图谱块级抽取线程池初始化完成");
+
+        return executor;
+    }
 }

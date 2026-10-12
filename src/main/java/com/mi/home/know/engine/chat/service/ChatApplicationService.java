@@ -21,6 +21,9 @@ import com.mi.home.know.engine.document.entity.TableMeta;
 import com.mi.home.know.engine.document.service.KnowEngineTableMetaService;
 import com.mi.home.know.engine.document.service.KnowledgeSegmentService;
 import com.mi.home.know.engine.document.util.DocumentPermissionUtils;
+import com.mi.home.know.engine.graph.config.GraphProperties;
+import com.mi.home.know.engine.graph.service.GraphQueryEntityService;
+import com.mi.home.know.engine.graph.store.GraphStore;
 import com.mi.home.know.engine.rag.constant.RoleEnum;
 import com.mi.home.know.engine.rag.modules.*;
 import com.mi.home.know.engine.rag.modules.reranker.BgeScoringModel;
@@ -130,6 +133,12 @@ public class ChatApplicationService {
     @Autowired
     private DatabaseChatMemoryStore databaseChatMemoryStore;
 
+    @Autowired
+    private GraphStore graphStore;
+
+    @Autowired
+    private GraphQueryEntityService graphQueryEntityService;
+
     @Value("${langchain4j.open-ai.chat-model.api-key}")
     private String chatModelApiKey;
 
@@ -187,6 +196,19 @@ public class ChatApplicationService {
      */
     @Value("${know-engine.retrieval.keyword-weight:0.3}")
     private double keywordWeight;
+
+    // ==================== 图谱抽取（入库侧产物，运行时按实体名查图） ====================
+
+    /**
+     * 图谱抽取配置。
+     * <p>
+     * <b>一个开关管两端</b>：关掉时入库不抽（每块两次 LLM 调用，这是整条流水线里最贵的一环），
+     * 运行时也不查——图里没东西可查，再去抽一次查询实体纯属浪费。
+     * <p>
+     * 注意 {@code knowledgeBase} 必须是全局唯一的值：入库侧按它写节点，运行时按它查节点。
+     */
+    @Autowired
+    private GraphProperties graphProperties;
 
     /**
      * RAG 流式生成用的模型名（质量优先）。
@@ -464,6 +486,26 @@ public class ChatApplicationService {
                         log.warn("Error creating Neo4j retriever", e);
                     }
 
+                    // ========== 实体图检索路 ==========
+                    // 与上面的 Text2Cypher 路是两回事：那条查人工维护的结构化业务图（品牌-车型-配件），
+                    // 直接产出答案文本；这条查从文档正文自动抽出来的实体图（图谱抽取的产物），
+                    // 产出的是"该看哪些 chunk"，因此走和向量结果完全一样的融合/精排管线。
+                    ProgressAwareContentRetriever entityGraphRetriever = null;
+                    if (graphProperties.isEnabled() && graphStore.isAvailable()) {
+                        entityGraphRetriever = new ProgressAwareContentRetriever(
+                                new KnowEngineEntityGraphContentRetriever(
+                                        graphStore,
+                                        knowledgeSegmentService,
+                                        graphQueryEntityService,
+                                        graphProperties.getKnowledgeBase(),
+                                        graphProperties.getQueryRowLimit(),
+                                        graphProperties.getQueryMaxChunks(),
+                                        buildAllowedAccessibleBy(chatParam)),
+                                processCallback, "正在沿知识图谱追溯关联片段...");
+                    } else if (graphProperties.isEnabled()) {
+                        log.info("图谱抽取已启用但 Neo4j 不可用，本次跳过实体图检索");
+                    }
+
                     // 精排模型可选：未下载模型时为 null，聚合器会自动降级为按 RRF 融合分排序
                     OnnxScoringModel scoringModel = BgeScoringModel.getInstance();
                     if (scoringModel == null) {
@@ -503,13 +545,15 @@ public class ChatApplicationService {
                     if ("router".equalsIgnoreCase(retrievalMode)) {
                         log.info("检索模式：router（LLM 互斥路由）");
                         queryRouter = new KnowEngineQueryRouter(
-                                nonNullList(embeddingRetriever, fullTextRetriever, sqlRetriever, neo4jRetriever),
+                                nonNullList(embeddingRetriever, fullTextRetriever, sqlRetriever, neo4jRetriever,
+                                        entityGraphRetriever),
                                 chatModel, processCallback);
                     } else {
-                        log.info("检索模式：gate（主干无条件并行 + 闸门叠加），graphGateOpen={}, structuredEntityPresent={}",
-                                graphGateOpen, structuredEntityPresent);
+                        log.info("检索模式：gate（主干无条件并行 + 闸门叠加），graphGateOpen={}, structuredEntityPresent={}, entityGraph={}",
+                                graphGateOpen, structuredEntityPresent, entityGraphRetriever != null);
                         queryRouter = new KnowEngineGateQueryRouter(
-                                new ArrayList<>(trunkRetrievers), neo4jRetriever, sqlRetriever, graphGateOpen, processCallback);
+                                new ArrayList<>(trunkRetrievers), neo4jRetriever, entityGraphRetriever,
+                                sqlRetriever, graphGateOpen, processCallback);
                     }
 
                     RetrievalAugmentor retrievalAugmentor = DefaultRetrievalAugmentor.builder()
@@ -628,6 +672,18 @@ public class ChatApplicationService {
         }
 
         return permissionFilter;
+    }
+
+    /**
+     * 当前用户角色允许的可见范围值列表，与 {@link #buildFilter} 同源。
+     * <p>
+     * 向量/关键词路把可见范围下推给 ES 做过滤；图路没有可下推的过滤条件
+     * （命中是"实体名"，和权限无关），所以把同一个白名单交给它在内存里校验，
+     * 保证两条路的可见性口径完全一致——否则会出现"向量路挡住了、图路却把无权正文捞出来"。
+     */
+    private List<String> buildAllowedAccessibleBy(ChatParam chatParam) {
+        RoleEnum roleEnum = userRoleService.getUserRole(chatParam);
+        return List.of(DocumentPermissionUtils.getDocumentAccessiblePermission(roleEnum));
     }
 
 }

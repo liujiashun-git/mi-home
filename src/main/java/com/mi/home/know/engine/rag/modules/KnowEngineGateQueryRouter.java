@@ -23,7 +23,8 @@ import java.util.function.Consumer;
  * │     └─ 关键词检索
  * │
  * └─ 叠加层（各自独立二元判定，可同时成立）
- *       ├─ 图检索：抽到实体才查
+ *       ├─ 图检索（实体图）：查询侧抽出实体才查图
+ *       ├─ 图检索（Text2Cypher）：意图识别抽到结构化实体才查图
  *       └─ SQL 检索：由检索器内部的表格 chunk 探测闸门控制
  * </pre>
  * <p>
@@ -39,6 +40,13 @@ import java.util.function.Consumer;
  * 图闸门判的是「意图识别有没有抽出实体」，这是<b>判有/无</b>；
  * 而不是「猜这个问题该不该查图」，那是<b>猜概率</b>。前者明显更可靠，
  * 而且复用已有的意图识别结果，零额外 LLM 调用。
+ * <p>
+ * <b>两条图路的闸门为什么不同：</b>
+ * Text2Cypher 查的是人工维护的结构化业务图，靠意图识别的槽位（car_id / part_name 等）
+ * 就能判"该不该查"，所以挂零成本的闸门；
+ * 实体图查的是从文档正文抽出来的实体，需要的是"问题里提到了什么实体"，
+ * 意图识别的固定槽位覆盖不到，于是它自己用改写后的 query 做一次实体抽取，
+ * 抽不出实体就返回空（<b>判的仍然是有/无，不是该不该</b>）。
  */
 @Slf4j
 public class KnowEngineGateQueryRouter implements QueryRouter {
@@ -59,6 +67,11 @@ public class KnowEngineGateQueryRouter implements QueryRouter {
     private final ContentRetriever graphRetriever;
 
     /**
+     * 实体图检索器（可选）。为 null 表示图谱抽取整体关闭
+     */
+    private final ContentRetriever entityGraphRetriever;
+
+    /**
      * SQL 检索器（可选）
      */
     private final ContentRetriever sqlRetriever;
@@ -77,11 +90,13 @@ public class KnowEngineGateQueryRouter implements QueryRouter {
 
     public KnowEngineGateQueryRouter(List<ContentRetriever> trunkRetrievers,
                                      ContentRetriever graphRetriever,
+                                     ContentRetriever entityGraphRetriever,
                                      ContentRetriever sqlRetriever,
                                      boolean graphGateOpen,
                                      Consumer<String> progressCallback) {
         this.trunkRetrievers = trunkRetrievers == null ? Collections.emptyList() : trunkRetrievers;
         this.graphRetriever = graphRetriever;
+        this.entityGraphRetriever = entityGraphRetriever;
         this.sqlRetriever = sqlRetriever;
         this.graphGateOpen = graphGateOpen;
         this.progressCallback = progressCallback;
@@ -93,7 +108,7 @@ public class KnowEngineGateQueryRouter implements QueryRouter {
             progressCallback.accept(PROGRESS_ROUTING);
         }
 
-        List<ContentRetriever> selected = new ArrayList<>(trunkRetrievers.size() + 2);
+        List<ContentRetriever> selected = new ArrayList<>(trunkRetrievers.size() + 3);
 
         // 主干：无条件并行，不做任何判断
         selected.addAll(trunkRetrievers);
@@ -101,8 +116,13 @@ public class KnowEngineGateQueryRouter implements QueryRouter {
         // 叠加层：各自独立判定，互不影响，可以同时成立
         if (graphGateOpen && graphRetriever != null) {
             selected.add(graphRetriever);
-        } else {
-            log.debug("图闸门关闭，本次跳过图检索。query={}", query.text());
+        } else if (graphRetriever != null) {
+            log.debug("图闸门关闭，本次跳过 Text2Cypher 图检索。query={}", query.text());
+        }
+
+        // 实体图：不做"该不该查"的判断，它自己会先抽实体，抽不出就返回空
+        if (entityGraphRetriever != null) {
+            selected.add(entityGraphRetriever);
         }
 
         // SQL 检索器总是参与；它内部还有一道「表格 chunk 探测」闸门决定是否真的跑 Text2SQL

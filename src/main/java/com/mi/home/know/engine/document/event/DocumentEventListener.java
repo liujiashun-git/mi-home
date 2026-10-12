@@ -7,6 +7,7 @@ import com.mi.home.know.engine.document.service.DocumentPostProcessService;
 import com.mi.home.know.engine.document.service.DocumentProcessService;
 import com.mi.home.know.engine.document.service.KnowledgeDocumentService;
 import com.mi.home.know.engine.document.service.KnowledgeDocumentVersionService;
+import com.mi.home.know.engine.graph.service.GraphExtractionService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Async;
@@ -34,6 +35,9 @@ public class DocumentEventListener {
 
     @Autowired
     private DocumentPostProcessService documentPostProcessService;
+
+    @Autowired
+    private GraphExtractionService graphExtractionService;
 
     /**
      * 监听文档CHUNKED事件，触发向量嵌入流程
@@ -72,6 +76,11 @@ public class DocumentEventListener {
                 // 主干入库完成后进入后处理（文档摘要 + 问题生成），异步、独立线程池、
                 // 失败不影响文档可用性
                 documentPostProcessService.postProcessAsync(document.getDocId(), event.getDocumentVersionId());
+
+                // 图谱抽取与摘要/问题生成同属"主干完成后的增强阶段"，但开关与线程池完全独立：
+                // 它是最贵的一环（每块两次 LLM 调用），必须能单独关、单独限流，
+                // 所以不从 postProcessAsync 里串起来调用，而是并列触发
+                graphExtractionService.extractAsync(document.getDocId(), event.getDocumentVersionId());
             }
 
         } catch (Exception e) {

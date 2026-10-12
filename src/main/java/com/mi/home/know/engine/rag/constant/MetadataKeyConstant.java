@@ -123,6 +123,17 @@ public class MetadataKeyConstant {
     public static final String QUESTION_ID = "questionId";
 
     /**
+     * 图谱抽取完成标记（写在原 chunk 的 metadata 上）。
+     * <p>
+     * 用途有二：
+     * ① <b>幂等</b>：已有该标记的块直接跳过，抽取任务可安全重跑；
+     * ② <b>区分"抽空"与"失败"</b>：模型正常返回空数组、或用散文拒绝输出（目录页这类没有实体的块），
+     *    都算"已完成"并打上标记——同样的输入重放没有意义，不打标记就会被反复重抽、白烧 LLM 额度。
+     *    只有调用异常/输出不合契约才不留标记，留给下次整篇重抽时再试。
+     */
+    public static final String GRAPH_EXTRACTED = "graphExtracted";
+
+    /**
      * 检索命中的原 chunk 附带"是通过哪个问题命中"的标注，供引用卡片展示
      */
     public static final String MATCHED_QUESTION = "matchedQuestion";

@@ -15,6 +15,8 @@ import com.mi.home.know.engine.document.service.impl.ExcelProcessServiceImpl;
 import com.mi.home.know.engine.document.service.KnowledgeDocumentVersionService;
 import com.mi.home.know.engine.document.service.KnowledgeSegmentService;
 import com.mi.home.know.engine.document.service.VectorStoreService;
+import com.mi.home.know.engine.graph.config.GraphProperties;
+import com.mi.home.know.engine.graph.store.GraphStore;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
@@ -27,6 +29,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.Assert;
 
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 
@@ -64,6 +67,9 @@ public class KnowledgeDocumentServiceImpl extends ServiceImpl<KnowledgeDocumentM
     @Override
     @Transactional(rollbackFor = Exception.class)
     public boolean removeDocumentWithSegments(Long docId) {
+        // 图谱溯源要按 chunkId 摘，所以必须在分段被物理删除【之前】先把 chunkId 取出来
+        List<String> chunkIds = knowledgeSegmentService.listChunkIdsByDocId(docId);
+
         // 按 metadata 中的 docId 删除该文档所有向量
         deleteVectorsByDocId(docId);
 
@@ -77,7 +83,12 @@ public class KnowledgeDocumentServiceImpl extends ServiceImpl<KnowledgeDocumentM
         knowledgeDocumentVersionMapper.physicalDeleteByDocId(docId);
 
         // 物理删除文档本身
-        return baseMapper.physicalDeleteByDocId(docId) > 0;
+        boolean removed = baseMapper.physicalDeleteByDocId(docId) > 0;
+
+        // 图溯源是引用计数式的：摘掉这些 chunk 后，chunks 被摘空的实体节点才真正删除——
+        // 其他文档可能也提到同一个实体，按 namespace 一刀切会把别人的图也删掉
+        delGraphProvenance(chunkIds);
+        return removed;
     }
 
     /**
@@ -92,6 +103,12 @@ public class KnowledgeDocumentServiceImpl extends ServiceImpl<KnowledgeDocumentM
         if (docIds == null || docIds.isEmpty()) {
             return false;
         }
+        // 同上：图溯源按 chunkId 摘，必须在分段被物理删除之前取出来
+        List<String> chunkIds = new ArrayList<>();
+        for (Long docId : docIds) {
+            chunkIds.addAll(knowledgeSegmentService.listChunkIdsByDocId(docId));
+        }
+
         // 按 metadata 中的 docId 批量删除所有向量
         deleteVectorsByDocIds(docIds);
 
@@ -107,7 +124,11 @@ public class KnowledgeDocumentServiceImpl extends ServiceImpl<KnowledgeDocumentM
         knowledgeDocumentVersionMapper.physicalDeleteByDocIds(docIds);
 
         // 物理删除文档本身
-        return baseMapper.physicalDeleteByDocIds(docIds) > 0;
+        boolean removed = baseMapper.physicalDeleteByDocIds(docIds) > 0;
+
+        // 同样按引用计数清理图溯源
+        delGraphProvenance(chunkIds);
+        return removed;
     }
 
     /**
@@ -139,11 +160,34 @@ public class KnowledgeDocumentServiceImpl extends ServiceImpl<KnowledgeDocumentM
         vectorStoreService.removeByDocIds(docIds);
     }
 
+    /**
+     * 清理这些 chunk 在图里的溯源。
+     * <p>
+     * <b>这是"删文档"在图侧的真实工作量</b>：不是删一个 namespace 那么简单，而是引用计数式的清理——
+     * 从所有实体节点/关系的 chunks 数组里摘掉这些 chunk，<b>只有被摘空的才删除</b>，
+     * 因为别的文档可能也提到同一个实体（"小米 SU7 Max"同时出现在产品手册和质保政策里）。
+     * <p>
+     * 清理失败不抛异常：图里残留的溯源最多让图检索多召回几条已删正文，
+     * 而取正文那步查不到分段会自然丢弃——降级可接受，不值得把文档删除流程搞挂。
+     */
+    private void delGraphProvenance(List<String> chunkIds) {
+        if (chunkIds == null || chunkIds.isEmpty()) {
+            return;
+        }
+        graphStore.delGraph(graphProperties.getKnowledgeBase(), chunkIds);
+    }
+
     @Autowired
     private DocumentCleanupService documentCleanupService;
 
     @Autowired
     private ExcelProcessServiceImpl excelProcessServiceImpl;
+
+    @Autowired
+    private GraphStore graphStore;
+
+    @Autowired
+    private GraphProperties graphProperties;
 
     /**
      * 让指定版本失效：
@@ -166,6 +210,9 @@ public class KnowledgeDocumentServiceImpl extends ServiceImpl<KnowledgeDocumentM
         Long docId = version.getDocId();
         log.info("开始让版本失效, docId={}, versionId={}", docId, versionId);
 
+        // 0. 取该版本贡献的 chunkId（图溯源要按 chunkId 摘），清图放在最后做
+        List<String> chunkIds = knowledgeSegmentService.listChunkIdsByDocIdAndVersion(docId, versionId);
+
         // 1. 按 docId + versionId 清理 ES 向量
         documentCleanupService.cleanupOldVersionData(docId, versionId);
 
@@ -183,6 +230,10 @@ public class KnowledgeDocumentServiceImpl extends ServiceImpl<KnowledgeDocumentM
         version.setStatus(DocumentStatus.CHUNKED);
         boolean versionUpdateResult = knowledgeDocumentVersionService.updateById(version);
         Assert.isTrue(versionUpdateResult, "文档版本状态更新失败");
+
+        // 4. 清掉旧版本在图里的溯源。分段行这时还在（只是状态降级），
+        //    所以必须按 chunkId 摘——这些块已经不再可检索，图里却还指着它们就会召回失效内容
+        delGraphProvenance(chunkIds);
         log.info("版本失效完成, versionId={}", versionId);
     }
 

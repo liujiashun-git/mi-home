@@ -160,8 +160,7 @@ know-engine:
     # 具体数值要用评测集定，不要照抄通用场景
     vector-weight: 0.7
     keyword-weight: 0.3
-  # 文档后处理（主干向量化完成后异步执行）。图谱抽取未实现——汽车 KB 关系类问题少，
-  # per-chunk LLM 成本不划算，等真有"XX 和 YY 什么关系"的查询需求再上。
+  # 文档后处理（主干向量化完成后异步执行）。
   postprocess:
     # 总开关
     enabled: true
@@ -174,6 +173,27 @@ know-engine:
     questions-max: 10
     # 每批送进 LLM 的 chunk 数（批内一次调用，批间独立检查取消）
     question-batch-size: 5
+
+  # 图谱抽取（从 chunk 正文抽实体+关系写 Neo4j，运行时按实体名做多跳召回）。
+  # 成本提示：这是整条后处理里最贵的一环——【每个 chunk 两次 LLM 调用】，
+  # 长文档几十上百块就是几百次调用。只对"关系类问题确实存在"的语料开。
+  # 一个开关管两端：关掉时入库不抽、运行时也不查图。
+  graph-extraction:
+    enabled: true
+    # 图的一级命名空间。入库按它写节点、运行时按它查节点，改这个值等于换一张图
+    knowledge-base: default
+    # 单块 LLM 调用失败的重试次数（"模型用散文拒绝输出"不算失败，不重试）
+    max-retry: 3
+    # 拼进 prompt 的单块正文上限
+    chunk-text-max-chars: 2000
+    # 单块落库条数上限，防模型刷量稀释图密度
+    max-entities-per-chunk: 30
+    max-relations-per-chunk: 50
+    # 运行时：一次查询最多抽几个实体查图（抽多了会把邻接子图都拉进来，精度变差）
+    query-max-entities: 6
+    # 运行时：图查询返回行数上限 + 一次最多带回几个 chunk
+    query-row-limit: 300
+    query-max-chunks: 20
 
 # XXL-Job 配置
 xxl:

@@ -6,6 +6,7 @@ import com.mi.home.know.engine.document.service.KnowledgeSegmentService;
 import com.mi.home.know.engine.document.service.VectorStoreService;
 import com.mi.home.know.engine.rag.constant.MetadataKeyConstant;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -15,6 +16,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.io.Serializable;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -69,6 +71,51 @@ public class KnowledgeSegmentServiceImpl extends ServiceImpl<KnowledgeSegmentMap
         QueryWrapper<KnowledgeSegment> queryWrapper = new QueryWrapper<>();
         queryWrapper.eq("chunk_id", chunkId);
         return super.getOne(queryWrapper, false);
+    }
+
+    @Override
+    public Map<String, KnowledgeSegment> getByChunkIds(Collection<String> chunkIds) {
+        if (chunkIds == null || chunkIds.isEmpty()) {
+            return Map.of();
+        }
+        List<String> ids = chunkIds.stream()
+                .filter(id -> id != null && !id.isEmpty())
+                .distinct()
+                .collect(Collectors.toList());
+        if (ids.isEmpty()) {
+            return Map.of();
+        }
+        QueryWrapper<KnowledgeSegment> queryWrapper = new QueryWrapper<>();
+        queryWrapper.in("chunk_id", ids);
+        List<KnowledgeSegment> segments = super.list(queryWrapper);
+        Map<String, KnowledgeSegment> result = new LinkedHashMap<>(segments.size());
+        for (KnowledgeSegment segment : segments) {
+            result.put(segment.getChunkId(), segment);
+        }
+        return result;
+    }
+
+    @Override
+    public List<String> listChunkIdsByDocId(Long docId) {
+        return listChunkIds(Wrappers.<KnowledgeSegment>query().select("chunk_id").eq("document_id", docId));
+    }
+
+    @Override
+    public List<String> listChunkIdsByDocIdAndVersion(Long docId, Long versionId) {
+        return listChunkIds(Wrappers.<KnowledgeSegment>query().select("chunk_id")
+                .eq("document_id", docId)
+                .eq("document_version", versionId));
+    }
+
+    /**
+     * 只 select chunk_id、不 select 正文与 metadata：清理图溯源只需要 ID，
+     * 长文档几百个块的正文全量拉回来纯属浪费。
+     */
+    private List<String> listChunkIds(QueryWrapper<KnowledgeSegment> queryWrapper) {
+        return super.list(queryWrapper).stream()
+                .map(KnowledgeSegment::getChunkId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
     }
 
     /**

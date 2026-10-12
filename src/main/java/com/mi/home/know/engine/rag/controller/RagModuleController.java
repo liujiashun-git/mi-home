@@ -6,12 +6,20 @@ import com.mi.home.know.engine.ai.service.IntentRecognitionService;
 import com.mi.home.know.engine.ai.service.PromptService;
 import com.mi.home.know.engine.chat.service.ChatMessageService;
 import com.mi.home.know.engine.document.service.KnowledgeSegmentService;
+import com.mi.home.know.engine.graph.config.GraphProperties;
+import com.mi.home.know.engine.graph.model.GraphData;
+import com.mi.home.know.engine.graph.model.GraphSearchResult;
+import com.mi.home.know.engine.graph.service.GraphExtractionService;
+import com.mi.home.know.engine.graph.service.GraphQueryEntityService;
+import com.mi.home.know.engine.graph.store.GraphStore;
 import com.mi.home.know.engine.rag.modules.KnowEngineElasticsearchContentRetriever;
+import com.mi.home.know.engine.rag.modules.KnowEngineEntityGraphContentRetriever;
 import com.mi.home.know.engine.rag.modules.KnowEngineNeo4jContentRetriever;
 import com.mi.home.know.engine.rag.modules.KnowEngineQueryRouter;
 import com.mi.home.know.engine.rag.modules.KnowEngineQueryTransformer;
 import com.mi.home.know.engine.rag.modules.reranker.BgeScoringModel;
 import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONObject;
 import dev.langchain4j.community.rag.content.retriever.neo4j.Neo4jGraph;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.data.segment.TextSegment;
@@ -51,6 +59,7 @@ import reactor.core.publisher.Flux;
 
 import javax.sql.DataSource;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -58,6 +67,8 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 import static com.mi.home.know.engine.rag.config.ElasticSearchConfiguration.INDEX_NAME;
+import static com.mi.home.know.engine.rag.constant.MetadataKeyConstant.CHUNK_ID;
+import static com.mi.home.know.engine.rag.constant.MetadataKeyConstant.DOC_ID;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
@@ -94,6 +105,18 @@ public class RagModuleController {
 
     @Autowired
     private ChatMessageService chatMessageService;
+
+    @Autowired
+    private GraphExtractionService graphExtractionService;
+
+    @Autowired
+    private GraphQueryEntityService graphQueryEntityService;
+
+    @Autowired
+    private GraphStore graphStore;
+
+    @Autowired
+    private GraphProperties graphProperties;
 
     private ElasticsearchContentRetriever fullTextRetriever;
 
@@ -243,6 +266,99 @@ public class RagModuleController {
         );
         System.out.println(JSON.toJSONString(contentInjector.inject(testContents, new UserMessage(query))));
         return ((UserMessage) contentInjector.inject(testContents, new UserMessage(query))).singleText();
+    }
+
+    // ==================== 图谱抽取验收接口 ====================
+    // 抽取是"每块两次 LLM 调用"的链路，出了问题必须能一段一段单独验，
+    // 而不是扔一篇文档进去从日志里猜。下面三个接口按验收顺序排：
+    // 抽取产物 → 查询侧实体 → 图检索命中，对应实施指南里的第 2/3 步验收。
+
+    /**
+     * 验收 1：直接看模型从一段文本里抽出了什么实体和关系（不落库）。
+     * <p>
+     * 例：{@code /ai/module/testGraphExtract?text=小米SU7 Max搭载宁德时代三元锂电池}
+     */
+    @GetMapping("testGraphExtract")
+    public String testGraphExtract(String text) {
+        if (text == null || text.isBlank()) {
+            return "请传入 text 参数，例如 ?text=小米SU7 Max搭载宁德时代提供的三元锂电池";
+        }
+        GraphData graph = graphExtractionService.extractText(text);
+        JSONObject result = new JSONObject();
+        result.put("entities", graph.nodes());
+        result.put("relations", graph.relations());
+        result.put("entityCount", graph.nodes().size());
+        result.put("relationCount", graph.relations().size());
+        return JSON.toJSONString(result);
+    }
+
+    /**
+     * 验收 2：看查询侧实体抽取（这一步用的是改写后的 query，直接传改写结果即可）。
+     * <p>
+     * 返回两部分：实际送进模型的 prompt，以及抽出来的实体名——
+     * 抽不出实体时先看 prompt，再看模型输出，别一上来就怀疑图库。
+     */
+    @GetMapping("testGraphQueryEntity")
+    public String testGraphQueryEntity(String query) {
+        if (query == null || query.isBlank()) {
+            return "请传入 query 参数，例如 ?query=小米SU7 Max用的是哪家的电池";
+        }
+        JSONObject result = new JSONObject();
+        result.put("prompt", graphQueryEntityService.buildPrompt(query));
+        result.put("entities", graphQueryEntityService.extract(query));
+        return JSON.toJSONString(result);
+    }
+
+    /**
+     * 验收 3：实体名 → 图节点 → chunk ID（"图当路由器"的完整前半程）。
+     * <p>
+     * 只做到 chunk ID，不取正文——正好验证"图的产出是 chunk，不是内容"这个不变量；
+     * 想连正文一起看就走 {@code /ai/module/testGraphChunks}。
+     */
+    @GetMapping("testGraphSearchNodes")
+    public String testGraphSearchNodes(String query) {
+        if (query == null || query.isBlank()) {
+            return "请传入 query 参数";
+        }
+        List<String> entities = graphQueryEntityService.extract(query);
+        GraphSearchResult graphResult = graphStore.searchNodes(
+                graphProperties.getKnowledgeBase(), entities, graphProperties.getQueryRowLimit());
+        JSONObject result = new JSONObject();
+        result.put("entities", entities);
+        result.put("nodes", graphResult.nodes());
+        result.put("relations", graphResult.relations());
+        result.put("chunkIds", graphResult.chunkIds());
+        return JSON.toJSONString(result);
+    }
+
+    /**
+     * 验收 4：完整图路——实体 → 图节点 → chunk ID → 正文。
+     * <p>
+     * 这条链路能跑通，一个多跳关系问题就能通过图路召回正确 chunk。
+     */
+    @GetMapping("testGraphChunks")
+    public String testGraphChunks(String query, String accessibleBy) {
+        if (query == null || query.isBlank()) {
+            return "请传入 query 参数；accessibleBy 可选（不传则不限制可见范围）";
+        }
+        List<String> allowed = (accessibleBy == null || accessibleBy.isBlank())
+                ? List.of()
+                : Arrays.stream(accessibleBy.split(",")).map(String::trim).toList();
+        KnowEngineEntityGraphContentRetriever retriever = new KnowEngineEntityGraphContentRetriever(
+                graphStore,
+                knowledgeSegmentService,
+                graphQueryEntityService,
+                graphProperties.getKnowledgeBase(),
+                graphProperties.getQueryRowLimit(),
+                graphProperties.getQueryMaxChunks(),
+                allowed);
+        List<Content> contents = retriever.retrieve(new Query(query));
+        return contents.stream()
+                .map(content -> String.format("[chunkId=%s] [docId=%s] %s",
+                        content.textSegment().metadata().getString(CHUNK_ID),
+                        content.textSegment().metadata().toMap().get(DOC_ID),
+                        content.textSegment().text()))
+                .collect(Collectors.joining("\n\n---\n\n"));
     }
 
     @GetMapping("testReranker")
