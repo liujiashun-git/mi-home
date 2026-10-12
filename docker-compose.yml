@@ -1,0 +1,148 @@
+# KnowEngine 本地开发中间件编排
+#
+# 一键拉起 KnowEngine 依赖的 5 个中间件，账号密码与 src/main/resources/application.yml 对齐。
+#
+#   docker compose up -d
+#   docker compose ps
+#
+# 端口占用提示：如果本机已经装了 MySQL/Redis，先把 ports 改成 13306/16379 之类的，
+# 再同步改 application.yml，别直接删端口映射（容器间通信不走宿主机端口）。
+#
+# XXL-Job 未包含在内。它只用于 DocumentCompensationJob 的定时补偿，
+# admin 不通不会阻塞应用启动（执行器注册失败只是重试 + 打日志），主流程不受影响。
+
+services:
+
+  mysql:
+    image: mysql:8.0
+    container_name: know-engine-mysql
+    restart: unless-stopped
+    ports:
+      # 宿主机 13306 -> 容器 3306。
+      # 故意避开默认的 3306：本机若已安装 MySQL（3306 与 33060 是 MySQL 8 的默认端口）
+      # 会导致容器端口绑定失败，报 "Only one usage of each socket address"。
+      # 对应的 JDBC URL 也要带 13306，见 application.yml。
+      - "13306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      # 下面三个变量会让官方镜像自动建库 + 建用户 + 授权，
+      # 不用再手写 CREATE DATABASE / GRANT
+      MYSQL_DATABASE: know_engine
+      MYSQL_USER: know_engine
+      MYSQL_PASSWORD: know_engine
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 首次启动（数据卷为空时）自动执行建表脚本
+      - ./src/main/resources/sql/tables.sql:/docker-entrypoint-initdb.d/01-tables.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    container_name: know-engine-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    # 注意：这里没开 TLS。application.yml 的 spring.data.redis.ssl.enabled 必须是 false，
+    # 否则 StringRedisTemplate 走 TLS 握手会连不上。
+    command: ["redis-server", "--requirepass", "knowengine", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "knowengine", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  elasticsearch:
+    image: elasticsearch:8.13.4
+    container_name: know-engine-es
+    restart: unless-stopped
+    ports:
+      - "9200:9200"
+    environment:
+      - discovery.type=single-node
+      # 本地开发关掉安全，省掉证书和账号配置
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - TZ=Asia/Shanghai
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9200/_cluster/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  neo4j:
+    image: neo4j:5.26
+    container_name: know-engine-neo4j
+    restart: unless-stopped
+    ports:
+      - "7474:7474"   # Browser
+      - "7687:7687"   # Bolt
+    environment:
+      # 与 application.yml 的 neo4j.username / neo4j.password 对齐
+      - NEO4J_AUTH=neo4j/neo4j666
+      # Text2Cypher 依赖 APOC 过程
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      - NEO4J_dbms_security_procedures_allowlist=apoc.*
+      - NEO4J_server_memory_heap_max__size=512m
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      # 用 cypher-shell 而不是 wget：neo4j 镜像里不保证有 wget/curl，
+      # 但 5.x 镜像自带 cypher-shell，判断更可靠
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p neo4j666 'RETURN 1' >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  minio:
+    image: minio/minio:latest
+    container_name: know-engine-minio
+    restart: unless-stopped
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web Console
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: ["server", "/data", "--console-address", ":9001"]
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    # 不需要单独跑一个 mc 容器来建 bucket：
+    # FileStorageService.createBucketIfNotExists() 会在首次上传文件时自动创建 bucket（publicRead）。
+    # 用 minio/mc 只会多一个镜像依赖和一个故障点。
+    # 如果想提前建好，也可以打开 http://localhost:9001 用 minioadmin/minioadmin 手动建 know-engine 桶。
+
+volumes:
+  mysql-data:
+  redis-data:
+  es-data:
+  neo4j-data:
+  minio-data:

@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>智能问答 · MiHome 知识引擎</title>
+<link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="css/vendor/highlight.css">
+</head>
+<body>
+
+<div class="app">
+  <!-- ======================= 侧栏 ======================= -->
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-mark" id="brandMark"></div>
+      <div class="brand-text">
+        <span class="brand-name">MiHome 知识引擎</span>
+        <span class="brand-sub">Multi-Source RAG</span>
+      </div>
+    </div>
+
+    <div class="side-section">
+      <button class="btn-new" id="btnNew"></button>
+      <div class="side-label">历史会话</div>
+    </div>
+
+    <div class="conv-list" id="convList"></div>
+
+    <div class="user-area">
+      <div class="avatar" id="userAvatar">–</div>
+      <div class="user-meta">
+        <div class="user-name" id="userName">加载中…</div>
+        <div class="user-role" id="userRole"></div>
+      </div>
+      <button class="btn-out" id="btnLogout" title="退出登录"></button>
+    </div>
+  </aside>
+
+  <!-- ======================= 主区 ======================= -->
+  <main class="main">
+    <header class="topbar">
+      <button class="icon-btn" id="btnMenu" style="display:none"></button>
+      <div class="topbar-title" id="convTitle">新对话</div>
+      <div class="topbar-spacer"></div>
+      <span class="chip" id="chipMode" title="当前检索调度模式"><span class="dot"></span></span>
+      <span class="chip" id="chipModel" title="对话模型"></span>
+      <button class="icon-btn" data-theme-toggle></button>
+    </header>
+
+    <div class="scroll" id="scroll">
+      <div class="messages" id="messages"></div>
+    </div>
+
+    <div class="composer-wrap">
+      <div class="composer">
+        <textarea id="input" rows="1" placeholder="输入你的问题，例如：小米 SU7 Pro 的 CLTC 续航是多少？"></textarea>
+        <button class="btn-send" id="btnSend" disabled></button>
+      </div>
+      <div class="composer-hint">
+        回答基于知识库检索生成，引用来源可展开查看 · Enter 发送，Shift + Enter 换行
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="js/vendor/marked.min.js"></script>
+<script src="js/vendor/purify.min.js"></script>
+<script src="js/vendor/highlight.min.js"></script>
+<script src="js/app.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var scrollEl   = document.getElementById('scroll');
+  var messagesEl = document.getElementById('messages');
+
+  var SUGGESTIONS = [
+    { t: '小米 SU7 Pro 的 CLTC 续航是多少？', d: '车型参数 · 表格检索' },
+    { t: 'SU7 和 YU7 的定位有什么区别？',      d: '跨车型对比' },
+    { t: '动力电池衰减到多少可以免费更换？',    d: '售后政策 · 三包' },
+    { t: '小米汽车一共召回了几次？',            d: '召回记录' },
+    { t: '前大灯更换大概要多少钱？',            d: '配件价格' },
+    { t: '无忧服务包包含哪些权益？',            d: '服务权益' }
+  ];
+
+  var state = { user: null, conversations: [], currentId: null, sending: false, cfg: {} };
+
+  /* ============================ 初始化 ============================ */
+  (function boot() {
+    KE.md.init();
+
+    document.getElementById('brandMark').innerHTML = KE.svg('spark', 18);
+    document.getElementById('btnNew').innerHTML = KE.svg('plus', 15) + '<span>新建对话</span>';
+    document.getElementById('btnLogout').innerHTML = KE.svg('logout', 16);
+    document.getElementById('btnSend').innerHTML = KE.svg('send', 17);
+    KE.theme.init();
+
+    bindEvents();
+    start();
+  })();
+
+  async function start() {
+    state.user = await KE.auth.require();
+    if (!state.user) return;
+    renderUser();
+    renderEmpty();
+    loadConfig();
+    loadConversations();
+  }
+
+  function renderUser() {
+    var u = state.user || {};
+    var name = u.nickname || u.name || u.phone || '用户';
+    document.getElementById('userAvatar').textContent = String(name).trim().charAt(0).toUpperCase();
+    document.getElementById('userName').textContent = name;
+    document.getElementById('userRole').textContent =
+      (u.userType === 'STAFF' || u.userType === 'staff') ? '知识库管理员' : '普通用户';
+  }
+
+  async function loadConfig() {
+    var chipMode = document.getElementById('chipMode');
+    var chipModel = document.getElementById('chipModel');
+    try { state.cfg = (await KE.api.get('/chat/config')) || {}; } catch (e) { state.cfg = {}; }
+
+    var mode = String(state.cfg.mode || 'gate').toLowerCase();
+    chipMode.className = 'chip ' + (mode === 'router' ? 'router' : 'gate');
+    chipMode.innerHTML = '<span class="dot"></span>' + (mode === 'router' ? 'LLM 互斥路由' : '主干并行 + 闸门');
+    chipMode.title = mode === 'router'
+      ? 'retrieval.mode = router：LLM 一次分类只选一路'
+      : 'retrieval.mode = gate：向量 ∥ 关键词无条件并行，图 / SQL 各自挂闸门';
+
+    if (state.cfg.model) {
+      chipModel.innerHTML = KE.svg('layers', 13) + KE.esc(state.cfg.model);
+    } else {
+      chipModel.style.display = 'none';
+    }
+  }
+
+  /* ============================ 空状态 ============================ */
+  function renderEmpty() {
+    var sug = SUGGESTIONS.map(function (s) {
+      return '<button class="sug" data-q="' + KE.esc(s.t) + '">' +
+        '<b>' + KE.esc(s.t) + '</b><span>' + KE.esc(s.d) + '</span></button>';
+    }).join('');
+
+    messagesEl.innerHTML =
+      '<div class="empty">' +
+        '<div class="empty-mark">' + KE.svg('spark', 28) + '</div>' +
+        '<h1>有什么可以帮你的？</h1>' +
+        '<p>基于知识库检索增强回答，并标注每一条引用来源</p>' +
+        '<div class="sug-grid">' + sug + '</div>' +
+      '</div>';
+
+    messagesEl.querySelectorAll('.sug').forEach(function (b) {
+      b.addEventListener('click', function () { send(b.getAttribute('data-q')); });
+    });
+  }
+
+  function clearMessages() { messagesEl.innerHTML = ''; }
+
+  /* ============================ 会话列表 ============================ */
+  async function loadConversations() {
+    var listEl = document.getElementById('convList');
+    try {
+      state.conversations = (await KE.api.get('/chat/list')) || [];
+    } catch (e) { state.conversations = []; }
+
+    if (!state.conversations.length) {
+      listEl.innerHTML = '<div class="side-empty">还没有会话<br>点上方「新建对话」开始</div>';
+      return;
+    }
+
+    listEl.innerHTML = state.conversations.map(function (c) {
+      var id = c.conversationId || c.id;
+      var title = c.title || c.convTitle || '未命名会话';
+      var active = String(id) === String(state.currentId) ? ' active' : '';
+      return '<div class="conv-item' + active + '" data-id="' + KE.esc(id) + '">' +
+        KE.svg('chat', 15) +
+        '<span class="conv-title">' + KE.esc(title) + '</span>' +
+        '<button class="conv-del" data-del="' + KE.esc(id) + '" title="删除会话">' + KE.svg('trash', 14) + '</button>' +
+        '</div>';
+    }).join('');
+
+    listEl.querySelectorAll('.conv-item').forEach(function (el) {
+      el.addEventListener('click', function (e) {
+        if (e.target.closest('[data-del]')) return;
+        selectConversation(el.getAttribute('data-id'));
+      });
+    });
+    listEl.querySelectorAll('[data-del]').forEach(function (b) {
+      b.addEventListener('click', async function (e) {
+        e.stopPropagation();
+        var id = b.getAttribute('data-del');
+        var ok = await KE.confirmDialog('删除会话', '该会话及其消息将被删除，且不可恢复。', '删除');
+        if (!ok) return;
+        try {
+          await KE.api.del('/chat/' + encodeURIComponent(id));
+          KE.toast('会话已删除', 'ok');
+          if (String(id) === String(state.currentId)) newConversation();
+          loadConversations();
+        } catch (err) { KE.toast('删除失败：' + err.message, 'err'); }
+      });
+    });
+  }
+
+  async function selectConversation(id) {
+    if (state.sending) { KE.toast('正在生成回答，请稍候', 'warn'); return; }
+    state.currentId = id;
+    var conv = state.conversations.find(function (c) {
+      return String(c.conversationId || c.id) === String(id);
+    });
+    document.getElementById('convTitle').textContent =
+      conv ? (conv.title || conv.convTitle || '会话') : '会话';
+    document.querySelectorAll('.conv-item').forEach(function (el) {
+      el.classList.toggle('active', el.getAttribute('data-id') === String(id));
+    });
+
+    clearMessages();
+    try {
+      var msgs = (await KE.api.get('/chat/messages?conversationId=' + encodeURIComponent(id))) || [];
+      if (!msgs.length) { renderEmpty(); return; }
+      msgs.forEach(function (m) { renderHistoryMessage(m); });
+      scrollToBottom(true);
+    } catch (e) {
+      KE.toast('加载消息失败：' + e.message, 'err');
+    }
+  }
+
+  function newConversation() {
+    if (state.sending) { KE.toast('正在生成回答，请稍候', 'warn'); return; }
+    state.currentId = null;
+    document.getElementById('convTitle').textContent = '新对话';
+    document.querySelectorAll('.conv-item').forEach(function (el) { el.classList.remove('active'); });
+    renderEmpty();
+  }
+
+  /* ============================ 消息渲染 ============================ */
+  function userMessageEl(text) {
+    var el = document.createElement('div');
+    el.className = 'msg user';
+    el.innerHTML =
+      '<div class="msg-avatar">' + KE.svg('user', 16) + '</div>' +
+      '<div class="msg-body">' +
+        '<div class="bubble">' + KE.esc(text).replace(/\n/g, '<br>') + '</div>' +
+      '</div>';
+    return el;
+  }
+
+  function assistantMessageEl() {
+    var el = document.createElement('div');
+    el.className = 'msg assistant';
+    el.innerHTML =
+      '<div class="msg-avatar">' + KE.svg('spark', 16) + '</div>' +
+      '<div class="msg-body">' +
+        '<div class="trace" style="display:none">' +
+          '<div class="trace-head">' + KE.svg('chevron', 13) +
+            '<span class="trace-title">检索过程</span>' +
+            '<span class="trace-count"></span>' +
+          '</div>' +
+          '<div class="trace-steps"></div>' +
+        '</div>' +
+        '<div class="bubble">' +
+          '<div class="md"></div>' +
+          '<div class="sources" style="display:none"></div>' +
+        '</div>' +
+        '<div class="msg-actions">' +
+          '<button class="mini-btn" data-act="copy">' + KE.svg('copy', 13) + '复制</button>' +
+        '</div>' +
+      '</div>';
+
+    el.querySelector('.trace-head').addEventListener('click', function () {
+      el.querySelector('.trace').classList.toggle('open');
+    });
+    el.querySelector('[data-act="copy"]').addEventListener('click', function () {
+      var txt = el.querySelector('.md').innerText;
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(txt).then(function () { KE.toast('已复制', 'ok'); });
+      }
+    });
+    return el;
+  }
+
+  function renderHistoryMessage(m) {
+    if (String(m.type || '').toUpperCase() === 'USER') {
+      messagesEl.appendChild(userMessageEl(m.content || ''));
+      return;
+    }
+    var el = assistantMessageEl();
+    messagesEl.appendChild(el);
+    el.querySelector('.md').innerHTML = KE.md.render(m.content || '');
+    var refs = m.ragReferences || [];
+    if (refs.length) renderSources(el, refs);
+    var t = KE.timeText(m.createTime || m.createdAt);
+    if (t) appendTime(el, t);
+  }
+
+  function appendTime(el, t) {
+    var actions = el.querySelector('.msg-actions');
+    var span = document.createElement('span');
+    span.style.cssText = 'font-size:11.5px;color:var(--text-3);margin-left:6px;align-self:center';
+    span.textContent = t;
+    actions.appendChild(span);
+  }
+
+  /* ---------------------------- 检索轨迹 ---------------------------- */
+  function traceStep(el, text, done) {
+    var box = el.querySelector('.trace-steps');
+    var prev = box.querySelector('.trace-step.pending');
+    if (prev) {
+      prev.classList.remove('pending');
+      prev.querySelector('.st-dot').innerHTML = '✓';
+    }
+    var step = document.createElement('div');
+    step.className = 'trace-step' + (done ? '' : ' pending');
+    step.innerHTML = '<span class="st-dot">' + (done ? '✓' : '') + '</span>' +
+      '<span class="st-text">' + KE.esc(text) + '</span>';
+    box.appendChild(step);
+
+    el.querySelector('.trace').style.display = '';
+    el.querySelector('.trace-count').textContent = box.children.length + ' 步';
+  }
+
+  function finishTrace(el) {
+    var box = el.querySelector('.trace-steps');
+    box.querySelectorAll('.trace-step.pending').forEach(function (s) {
+      s.classList.remove('pending');
+      s.querySelector('.st-dot').innerHTML = '✓';
+    });
+    if (!box.children.length) el.querySelector('.trace').style.display = 'none';
+  }
+
+  /* ---------------------------- 引用来源 ---------------------------- */
+  var SRC_LABEL = { vector: '向量', keyword: '关键词', hybrid: '混合', rerank: '精排' };
+
+  function locatorText(ref) {
+    var m = ref.metadata || {};
+    var loc = m.locator || m.LOCATOR;
+    if (!loc) return '';
+    try {
+      var o = typeof loc === 'string' ? JSON.parse(loc) : loc;
+      if (o.sheet) {
+        var r = o.rowStart ? ' · 第 ' + o.rowStart + (o.rowEnd && o.rowEnd !== o.rowStart ? '–' + o.rowEnd : '') + ' 行' : '';
+        return 'Sheet「' + o.sheet + '」' + r;
+      }
+      if (o.page) return '第 ' + o.page + ' 页';
+      return '';
+    } catch (e) { return ''; }
+  }
+
+  function renderSources(msgEl, refs) {
+    if (!refs || !refs.length) return;
+    var box = msgEl.querySelector('.sources');
+    var seen = {};
+    var uniq = [];
+    refs.forEach(function (r) {
+      var k = (r.documentTitle || '') + '|' + (r.chunkId || '');
+      if (seen[k]) return;
+      seen[k] = 1;
+      uniq.push(r);
+    });
+
+    var html = '<div class="sources-head">' + KE.svg('layers', 13) +
+      '引用来源 · ' + uniq.length + ' 条</div><div class="src-grid">';
+
+    uniq.forEach(function (r, i) {
+      var src = String(r.retrievalSource || '').toLowerCase();
+      var label = SRC_LABEL[src] || '检索';
+      var cls = SRC_LABEL[src] ? src : 'vector';
+
+      var scores = [];
+      if (typeof r.similarityScore === 'number') scores.push('相似度 <b>' + r.similarityScore.toFixed(3) + '</b>');
+      if (typeof r.rerankScore === 'number') scores.push('精排 <b>' + r.rerankScore.toFixed(3) + '</b>');
+
+      var loc = locatorText(r);
+      var snippet = String(r.chunkContent || '').replace(/\s+/g, ' ').trim();
+      if (snippet.length > 190) snippet = snippet.slice(0, 190) + '…';
+
+      var title = r.documentTitle || '未知文档';
+      var titleInner = KE.svg('file', 13) + '<span class="src-title">' + KE.esc(title) + '</span>';
+      var titleEl = r.url
+        ? '<a href="' + KE.esc(r.url) + '" target="_blank" style="flex:1;min-width:0;display:flex;align-items:center;gap:7px">' + titleInner + '</a>'
+        : '<span style="flex:1;min-width:0;display:flex;align-items:center;gap:7px">' + titleInner + '</span>';
+
+      html += '<div class="src-card">' +
+        '<div class="src-top">' +
+          '<span class="src-index">' + (i + 1) + '</span>' +
+          '<span class="src-badge ' + cls + '">' + label + '</span>' +
+          titleEl +
+        '</div>' +
+        (loc ? '<div class="src-loc">' + KE.svg('pin', 11) + KE.esc(loc) + '</div>' : '') +
+        (snippet ? '<div class="src-snippet">' + KE.esc(snippet) + '</div>' : '') +
+        (scores.length ? '<div class="src-scores"><span>' + scores.join('</span><span>') + '</span></div>' : '') +
+        '</div>';
+    });
+
+    html += '</div>';
+    box.innerHTML = html;
+    box.style.display = '';
+  }
+
+  /* ============================ 发送 ============================ */
+  async function send(text, extraParams) {
+    text = (text || '').trim();
+    if (!text || state.sending) return;
+
+    if (messagesEl.querySelector('.empty')) clearMessages();
+
+    messagesEl.appendChild(userMessageEl(text));
+    var aiEl = assistantMessageEl();
+    messagesEl.appendChild(aiEl);
+    scrollToBottom(true);
+
+    state.sending = true;
+    setSending(true);
+
+    var mdEl = aiEl.querySelector('.md');
+    var buffer = '';
+
+    function updateContent(final) {
+      mdEl.innerHTML = KE.md.render(buffer) + (final ? '' : '<span class="caret"></span>');
+      scrollToBottom();
+    }
+
+    function handleEvent(block) {
+      if (!block) return;
+      var lines = block.split(/\r?\n/);
+      var dataLines = [];
+      var fallback = '';
+      for (var i = 0; i < lines.length; i++) {
+        var ln = lines[i];
+        if (ln.indexOf('data:') === 0) {
+          var v = ln.substring(5);
+          if (v.charAt(0) === ' ') v = v.substring(1);
+          dataLines.push(v);
+        } else if (ln.trim() && ln.charAt(0) !== ':') {
+          fallback = ln.trim();
+        }
+      }
+      var data = dataLines.length ? dataLines.join('\n') : fallback;
+      if (!data) return;
+
+      if (data.indexOf('[DONE]:') === 0) {
+        var cid = data.substring(7).trim();
+        if (cid) {
+          var first = !state.currentId;
+          state.currentId = cid;
+          if (first) {
+            document.getElementById('convTitle').textContent = text.slice(0, 24);
+            loadConversations();
+          }
+        }
+        return;
+      }
+      if (data === '[DONE]') return;
+
+      if (data.indexOf('[PROGRESS]:') === 0) {
+        traceStep(aiEl, data.substring(11).trim(), false);
+        return;
+      }
+      if (data.indexOf('[REFERENCE]:') === 0) {
+        try { renderSources(aiEl, JSON.parse(data.substring(12).trim())); } catch (e) { /* 忽略 */ }
+        return;
+      }
+      if (data.indexOf('[WARN]:') === 0) {
+        var w = document.createElement('div');
+        w.className = 'warnbar';
+        w.innerHTML = KE.svg('alert', 15) + '<span>' + KE.esc(data.substring(7).trim()) + '</span>';
+        aiEl.querySelector('.bubble').insertBefore(w, mdEl);
+        return;
+      }
+      buffer += data;
+      updateContent(false);
+    }
+
+    try {
+      var params = new URLSearchParams();
+      params.append('content', text);
+      if (state.currentId) params.append('conversationId', state.currentId);
+      if (extraParams) {
+        Object.keys(extraParams).forEach(function (k) {
+          if (extraParams[k]) params.append(k, extraParams[k]);
+        });
+      }
+
+      var res = await fetch('/chat/send?' + params.toString(), {
+        method: 'POST',
+        credentials: 'same-origin'
+      });
+      if (res.status === 401) { location.href = '/login.html'; return; }
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+
+      var reader = res.body.getReader();
+      var decoder = new TextDecoder();
+      var carry = '';
+
+      while (true) {
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        carry += decoder.decode(chunk.value, { stream: true });
+        var blocks = carry.split(/\n\n/);
+        carry = blocks.pop();
+        for (var i = 0; i < blocks.length; i++) handleEvent(blocks[i]);
+      }
+      if (carry.trim()) handleEvent(carry);
+
+      finishTrace(aiEl);
+      updateContent(true);
+      var t = KE.timeText(new Date());
+      if (t) appendTime(aiEl, t);
+    } catch (err) {
+      finishTrace(aiEl);
+      if (!buffer) {
+        mdEl.innerHTML = '<div class="warnbar">' + KE.svg('alert', 15) +
+          '<span>请求失败：' + KE.esc(err.message) + '</span></div>';
+      }
+      KE.toast('发送失败：' + err.message, 'err');
+    } finally {
+      state.sending = false;
+      setSending(false);
+      scrollToBottom();
+    }
+  }
+
+  function setSending(on) {
+    var input = document.getElementById('input');
+    var btn = document.getElementById('btnSend');
+    input.readOnly = on;
+    btn.disabled = on || !input.value.trim();
+  }
+
+  function scrollToBottom(force) {
+    var near = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 260;
+    if (force || near) scrollEl.scrollTop = scrollEl.scrollHeight;
+  }
+
+  /* ============================ 事件绑定 ============================ */
+  function bindEvents() {
+    var input = document.getElementById('input');
+    var btnSend = document.getElementById('btnSend');
+
+    function autoGrow() {
+      input.style.height = 'auto';
+      input.style.height = Math.min(input.scrollHeight, 168) + 'px';
+      btnSend.disabled = state.sending || !input.value.trim();
+    }
+    input.addEventListener('input', autoGrow);
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+        e.preventDefault();
+        doSend();
+      }
+    });
+    btnSend.addEventListener('click', doSend);
+
+    function doSend() {
+      var v = input.value.trim();
+      if (!v || state.sending) return;
+      input.value = '';
+      autoGrow();
+      send(v);
+    }
+
+    document.getElementById('btnNew').addEventListener('click', newConversation);
+    document.getElementById('btnLogout').addEventListener('click', async function () {
+      if (state.sending) { KE.toast('正在生成回答，请稍候', 'warn'); return; }
+      var ok = await KE.confirmDialog('退出登录', '确定要退出当前账号吗？', '退出');
+      if (ok) KE.auth.logout();
+    });
+
+    var btnMenu = document.getElementById('btnMenu');
+    function syncMenu() {
+      var show = window.innerWidth <= 860;
+      btnMenu.style.display = show ? '' : 'none';
+    }
+    syncMenu();
+    btnMenu.addEventListener('click', function (e) {
+      e.stopPropagation();
+      document.getElementById('sidebar').classList.toggle('open');
+    });
+    window.addEventListener('resize', syncMenu);
+    document.addEventListener('click', function (e) {
+      if (window.innerWidth > 860) return;
+      var sb = document.getElementById('sidebar');
+      if (sb.classList.contains('open') && !sb.contains(e.target)) sb.classList.remove('open');
+    });
+  }
+})();
+</script>
+</body>
+</html>

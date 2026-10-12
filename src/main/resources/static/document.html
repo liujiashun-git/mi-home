@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文档管理 · MiHome 知识引擎</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<div class="page">
+  <div class="page-inner" style="max-width:1240px">
+
+    <div class="page-head">
+      <div class="avatar" style="border-radius:11px" id="navMark"></div>
+      <h1>文档管理</h1>
+      <div style="flex:1"></div>
+      <a class="btn" href="/chat.html">AI 对话</a>
+      <a class="btn btn-primary" href="/upload.html">+ 上传文档</a>
+      <button class="icon-btn" data-theme-toggle></button>
+    </div>
+
+    <!-- ============ 筛选 ============ -->
+    <div class="card" style="padding:16px;margin-bottom:16px">
+      <div class="row">
+        <div class="field" style="margin:0">
+          <label for="fTitle">标题</label>
+          <input class="input" id="fTitle" placeholder="按标题模糊搜索">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="fType">知识库类型</label>
+          <select class="select" id="fType">
+            <option value="">全部</option>
+            <option value="DOCUMENT_SEARCH">文档搜索</option>
+            <option value="DATA_QUERY">数据查询</option>
+          </select>
+        </div>
+        <div class="field" style="margin:0">
+          <label for="fStatus">状态</label>
+          <select class="select" id="fStatus">
+            <option value="">全部</option>
+            <option value="UPLOADED">已上传</option>
+            <option value="CONVERTED">已转换</option>
+            <option value="CHUNKED">已切片</option>
+            <option value="VECTOR_STORED">已向量化</option>
+            <option value="STORED">已入库</option>
+          </select>
+        </div>
+        <div class="field" style="margin:0;display:flex;align-items:flex-end;gap:9px;flex:0 0 auto">
+          <button class="btn btn-primary" id="btnSearch">查询</button>
+          <button class="btn" id="btnReset">重置</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 列表 ============ -->
+    <div class="card" style="padding:16px">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+        <span style="font-size:14px;font-weight:620" id="totalText">加载中…</span>
+        <div style="flex:1"></div>
+        <button class="btn" id="btnBatchDel" style="display:none">删除选中</button>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:38px"><input type="checkbox" id="checkAll"></th>
+              <th>文档标题</th>
+              <th style="width:110px">类型</th>
+              <th style="width:110px">状态</th>
+              <th style="width:130px">可见范围</th>
+              <th style="width:90px">分段数</th>
+              <th style="width:150px">更新时间</th>
+              <th style="width:170px;text-align:right">操作</th>
+            </tr>
+          </thead>
+          <tbody id="tbody">
+            <tr><td colspan="8" class="empty-row">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:12px;margin-top:14px">
+        <span class="hint" id="pageInfo" style="margin:0"></span>
+        <div style="flex:1"></div>
+        <button class="btn" id="btnPrev">上一页</button>
+        <button class="btn" id="btnNext">下一页</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ============ 分段查看 ============ -->
+<div id="segModal" style="display:none;position:fixed;inset:0;background:rgba(9,12,17,.5);z-index:9000;padding:32px;backdrop-filter:blur(2px)">
+  <div class="card" style="max-width:980px;margin:0 auto;height:100%;display:flex;flex-direction:column;overflow:hidden">
+    <div style="display:flex;align-items:center;gap:12px;padding:16px 18px;border-bottom:1px solid var(--border)">
+      <div>
+        <div style="font-size:15px;font-weight:620" id="segTitle">分段预览</div>
+        <div class="hint" id="segSub" style="margin:2px 0 0"></div>
+      </div>
+      <div style="flex:1"></div>
+      <button class="icon-btn" id="segClose" title="关闭"></button>
+    </div>
+    <div style="flex:1;overflow-y:auto;padding:16px 18px" id="segBody"></div>
+    <div style="display:flex;align-items:center;gap:12px;padding:12px 18px;border-top:1px solid var(--border)">
+      <span class="hint" id="segPageInfo" style="margin:0"></span>
+      <div style="flex:1"></div>
+      <button class="btn" id="segPrev">上一页</button>
+      <button class="btn" id="segNext">下一页</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/app.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  KE.theme.init();
+  document.getElementById('navMark').innerHTML = KE.svg('spark', 18);
+  document.getElementById('segClose').innerHTML = KE.svg('plus', 18); // 旋转成 ×
+  document.getElementById('segClose').style.transform = 'rotate(45deg)';
+  document.querySelectorAll('[data-theme-toggle]').forEach(function (b) {
+    b.innerHTML = KE.svg(KE.theme.get() === 'dark' ? 'sun' : 'moon', 17);
+    b.addEventListener('click', KE.theme.toggle);
+  });
+
+  var STATUS_LABEL = {
+    INIT: '初始化', UPLOADED: '已上传', CONVERTING: '转换中', CONVERTED: '已转换',
+    CHUNKED: '已切片', VECTOR_STORED: '已向量化', STORED: '已入库'
+  };
+  var TYPE_LABEL = { DOCUMENT_SEARCH: '文档搜索', DATA_QUERY: '数据查询' };
+  var ACCESS_LABEL = {
+    VISITOR: '所有人', OWNER: '客服 + 车主', CUSTOMER_SERVICE: '仅客服'
+  };
+  var CT_LABEL = {
+    table_row: '表格行', table_summary: '表摘要', table_column: '列描述'
+  };
+
+  var state = { current: 1, size: 10, total: 0, pages: 1, rows: [], selected: {} };
+  var seg = { docId: null, current: 1, size: 10, pages: 1 };
+
+  KE.auth.require().then(load);
+
+  function q(sel) { return document.querySelector(sel); }
+
+  /* ---------------------------- 列表 ---------------------------- */
+  async function load() {
+    var params = new URLSearchParams();
+    params.append('current', state.current);
+    params.append('size', state.size);
+    var t = q('#fTitle').value.trim();
+    var ty = q('#fType').value;
+    var st = q('#fStatus').value;
+    if (t) params.append('docTitle', t);
+    if (ty) params.append('knowledgeBaseType', ty);
+    if (st) params.append('status', st);
+
+    try {
+      var page = await KE.api.get('/api/document/page?' + params.toString());
+      state.rows = page.records || [];
+      state.total = page.total || 0;
+      state.pages = page.pages || 1;
+      renderTable();
+      renderPager();
+    } catch (e) {
+      q('#tbody').innerHTML = '<tr><td colspan="8" class="empty-row">加载失败：' + KE.esc(e.message) + '</td></tr>';
+      q('#totalText').textContent = '加载失败';
+    }
+  }
+
+  function renderTable() {
+    var tb = q('#tbody');
+    if (!state.rows.length) {
+      tb.innerHTML = '<tr><td colspan="8" class="empty-row">暂无文档，去「上传文档」添加第一份</td></tr>';
+      q('#totalText').textContent = '共 0 条记录';
+      return;
+    }
+
+    tb.innerHTML = state.rows.map(function (d) {
+      var id = d.docId;
+      var st = d.status || 'INIT';
+      var tagCls = st === 'STORED' || st === 'VECTOR_STORED' ? 'ok'
+                 : (st === 'CHUNKED' || st === 'CONVERTED' ? 'info' : 'warn');
+      return '<tr data-id="' + id + '">' +
+        '<td><input type="checkbox" data-check="' + id + '"' + (state.selected[id] ? ' checked' : '') + '></td>' +
+        '<td class="td-title" title="' + KE.esc(d.docTitle || '') + '">' + KE.esc(d.docTitle || '(无标题)') + '</td>' +
+        '<td><span class="tag info">' + KE.esc(TYPE_LABEL[d.knowledgeBaseType] || d.knowledgeBaseType || '-') + '</span></td>' +
+        '<td><span class="tag ' + tagCls + '">' + KE.esc(STATUS_LABEL[st] || st) + '</span></td>' +
+        '<td>' + KE.esc(ACCESS_LABEL[d.accessibleBy] || d.accessibleBy || '-') + '</td>' +
+        '<td data-seg-count="' + id + '">—</td>' +
+        '<td>' + KE.esc(fmtTime(d.updateTime || d.createTime)) + '</td>' +
+        '<td class="td-actions">' +
+          '<button class="mini-btn" data-act="seg" data-id="' + id + '">' + KE.svg('layers', 13) + '分段</button>' +
+          '<button class="mini-btn" data-act="del" data-id="' + id + '">' + KE.svg('trash', 13) + '删除</button>' +
+        '</td>' +
+        '</tr>';
+    }).join('');
+
+    q('#totalText').textContent = '共 ' + state.total + ' 条记录';
+
+    // 分段数（异步补）
+    state.rows.forEach(function (d) {
+      if (String(d.knowledgeBaseType) === 'DATA_QUERY') {
+        var c = tb.querySelector('[data-seg-count="' + d.docId + '"]');
+        if (c) c.textContent = '—';
+        return;
+      }
+      KE.api.get('/api/segment/count-by-document?documentId=' + d.docId)
+        .then(function (n) {
+          var cell = tb.querySelector('[data-seg-count="' + d.docId + '"]');
+          if (cell) cell.textContent = n + ' 段';
+        })
+        .catch(function () {});
+    });
+  }
+
+  function fmtTime(v) {
+    if (!v) return '-';
+    var s = String(v).replace(' ', 'T');
+    var d = new Date(s);
+    if (isNaN(d.getTime())) return String(v).slice(0, 16).replace('T', ' ');
+    var p = function (n) { return String(n).padStart(2, '0'); };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+      ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  function renderPager() {
+    q('#pageInfo').textContent = '第 ' + state.current + ' / ' + state.pages + ' 页';
+    q('#btnPrev').disabled = state.current <= 1;
+    q('#btnNext').disabled = state.current >= state.pages;
+  }
+
+  /* ---------------------------- 行内操作 ---------------------------- */
+  q('#tbody').addEventListener('click', async function (e) {
+    var btn = e.target.closest('[data-act]');
+    if (btn) {
+      var id = btn.getAttribute('data-id');
+      if (btn.getAttribute('data-act') === 'seg') return openSegments(id);
+      if (btn.getAttribute('data-act') === 'del') {
+        var ok = await KE.confirmDialog('删除文档', '将同时删除该文档的全部分段与向量索引。', '删除');
+        if (!ok) return;
+        try {
+          await KE.api.del('/api/document/' + id);
+          KE.toast('已删除', 'ok');
+          load();
+        } catch (err) { KE.toast('删除失败：' + err.message, 'err'); }
+        return;
+      }
+    }
+    var chk = e.target.closest('[data-check]');
+    if (chk) {
+      var cid = chk.getAttribute('data-check');
+      if (chk.checked) state.selected[cid] = 1; else delete state.selected[cid];
+      syncBatch();
+    }
+  });
+
+  function syncBatch() {
+    var n = Object.keys(state.selected).length;
+    var b = q('#btnBatchDel');
+    b.style.display = n ? '' : 'none';
+    b.textContent = '删除选中（' + n + '）';
+  }
+
+  q('#checkAll').addEventListener('change', function () {
+    var on = this.checked;
+    state.rows.forEach(function (d) {
+      if (on) state.selected[d.docId] = 1; else delete state.selected[d.docId];
+    });
+    q('#tbody').querySelectorAll('[data-check]').forEach(function (c) { c.checked = on; });
+    syncBatch();
+  });
+
+  q('#btnBatchDel').addEventListener('click', async function () {
+    var ids = Object.keys(state.selected);
+    if (!ids.length) return;
+    var ok = await KE.confirmDialog('批量删除', '将删除选中的 ' + ids.length + ' 份文档及其分段。', '删除');
+    if (!ok) return;
+    try {
+      await KE.api.del('/api/document/batch?ids=' + ids.join(','));
+      KE.toast('已删除 ' + ids.length + ' 份文档', 'ok');
+      state.selected = {};
+      load();
+    } catch (e) { KE.toast('批量删除失败：' + e.message, 'err'); }
+  });
+
+  /* ---------------------------- 筛选 ---------------------------- */
+  q('#btnSearch').addEventListener('click', function () { state.current = 1; load(); });
+  q('#btnReset').addEventListener('click', function () {
+    q('#fTitle').value = ''; q('#fType').value = ''; q('#fStatus').value = '';
+    state.current = 1; load();
+  });
+  q('#fTitle').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { state.current = 1; load(); }
+  });
+  q('#btnPrev').addEventListener('click', function () {
+    if (state.current > 1) { state.current--; load(); }
+  });
+  q('#btnNext').addEventListener('click', function () {
+    if (state.current < state.pages) { state.current++; load(); }
+  });
+
+  /* ---------------------------- 分段查看 ---------------------------- */
+  function openSegments(docId) {
+    seg.docId = docId;
+    seg.current = 1;
+    var d = state.rows.find(function (x) { return String(x.docId) === String(docId); });
+    q('#segTitle').textContent = d ? (d.docTitle || '分段预览') : '分段预览';
+    q('#segModal').style.display = '';
+    loadSegments();
+  }
+
+  async function loadSegments() {
+    var body = q('#segBody');
+    body.innerHTML = '<div class="empty-row">加载中…</div>';
+    try {
+      var params = new URLSearchParams();
+      params.append('documentId', seg.docId);
+      params.append('current', seg.current);
+      params.append('size', seg.size);
+      var page = await KE.api.get('/api/segment/page-by-document?' + params.toString());
+      seg.pages = page.pages || 1;
+      var rows = page.records || [];
+
+      q('#segSub').textContent = '共 ' + (page.total || 0) + ' 个分段 · 每个分段都会独立向量化并可被检索命中';
+
+      if (!rows.length) {
+        body.innerHTML = '<div class="empty-row">该文档还没有分段，请先在「上传文档」页完成切片</div>';
+      } else {
+        body.innerHTML = rows.map(function (s) {
+          var meta = {};
+          try { meta = s.metadata ? (typeof s.metadata === 'string' ? JSON.parse(s.metadata) : s.metadata) : {}; } catch (e) { meta = {}; }
+          var ct = meta.contentType || '';
+          var ctTag = ct ? '<span class="tag info">' + KE.esc(CT_LABEL[ct] || ct) + '</span>' : '';
+
+          var loc = '';
+          if (meta.locator) {
+            try {
+              var o = typeof meta.locator === 'string' ? JSON.parse(meta.locator) : meta.locator;
+              if (o.sheet) loc = 'Sheet「' + o.sheet + '」' + (o.rowStart ? ' · 第 ' + o.rowStart + (o.rowEnd && o.rowEnd !== o.rowStart ? '–' + o.rowEnd : '') + ' 行' : '');
+              else if (o.page) loc = '第 ' + o.page + ' 页';
+            } catch (e) { /* ignore */ }
+          }
+          if (!loc && meta.sheetName) loc = 'Sheet「' + meta.sheetName + '」';
+
+          return '<div class="src-card" style="margin-bottom:10px;cursor:default">' +
+            '<div class="src-top">' +
+              '<span class="src-index">' + KE.esc(s.chunkOrder != null ? s.chunkOrder : '·') + '</span>' +
+              ctTag +
+              (loc ? '<span class="src-loc" style="margin:0">' + KE.svg('pin', 11) + KE.esc(loc) + '</span>' : '') +
+              '<div style="flex:1"></div>' +
+              '<span class="hint" style="margin:0">' + KE.esc(s.chunkId || '') + '</span>' +
+            '</div>' +
+            '<div style="font-size:12.8px;line-height:1.75;color:var(--text-2);white-space:pre-wrap;margin-top:8px">' +
+              KE.esc(s.text || '') +
+            '</div>' +
+          '</div>';
+        }).join('');
+      }
+
+      q('#segPageInfo').textContent = '第 ' + seg.current + ' / ' + seg.pages + ' 页';
+      q('#segPrev').disabled = seg.current <= 1;
+      q('#segNext').disabled = seg.current >= seg.pages;
+    } catch (e) {
+      body.innerHTML = '<div class="empty-row">加载失败：' + KE.esc(e.message) + '</div>';
+    }
+  }
+
+  q('#segClose').addEventListener('click', function () { q('#segModal').style.display = 'none'; });
+  q('#segModal').addEventListener('click', function (e) {
+    if (e.target === q('#segModal')) q('#segModal').style.display = 'none';
+  });
+  q('#segPrev').addEventListener('click', function () {
+    if (seg.current > 1) { seg.current--; loadSegments(); }
+  });
+  q('#segNext').addEventListener('click', function () {
+    if (seg.current < seg.pages) { seg.current++; loadSegments(); }
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') q('#segModal').style.display = 'none';
+  });
+})();
+</script>
+</body>
+</html>

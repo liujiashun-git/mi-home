@@ -1,0 +1,213 @@
+server:
+  port: 8009
+
+spring:
+  application:
+    name: KnowEngine
+  # 可选：把项目根目录下 .env 里的变量（如 DASHSCOPE_API_KEY）读进 Spring 环境。
+  # .env 已加入 .gitignore；没有这个文件也不影响启动（optional 前缀保证不报错）。
+  config:
+    import: optional:file:.env[.properties]
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 100MB
+      max-request-size: 100MB
+  datasource:
+    type: com.alibaba.druid.pool.DruidDataSource
+    # 端口 13306 对应 docker-compose.yml 里 mysql 的宿主机映射端口。
+    # 用 13306 而不是 3306，是为了避开本机可能已安装的 MySQL。
+    url: jdbc:mysql://127.0.0.1:13306/know_engine?rewriteBatchedStatements=true
+    username: know_engine
+    password: know_engine
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # druid:
+    initial-size: 5
+    min-idle: 5
+    max-active: 20
+    max-wait: 60000
+    time-between-eviction-runs-millis: 60000
+    min-evictable-idle-time-millis: 300000
+    validation-query: SELECT 1
+    test-while-idle: true
+    test-on-borrow: false
+    test-on-return: false
+    pool-prepared-statements: true
+    max-pool-prepared-statement-per-connection-size: 20
+    filters: stat,wall
+    connection-properties: druid.stat.mergeSql=true;druid.stat.slowSqlMillis=5000
+    stat-view-servlet:
+      enabled: true
+      url-pattern: /druid/*
+      login-username: admin
+      login-password: admin
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password: knowengine
+      # 本地 docker 起的 redis 默认不开 TLS，这里必须为 false，
+      # 否则 spring-data-redis 会走 TLS 握手直接连不上（StringRedisTemplate 全挂）。
+      # 如果换成开启了 TLS 的云 Redis，再改回 true。
+      ssl:
+        enabled: false
+  redis:
+    redisson:
+      config: |
+        singleServerConfig:
+          idleConnectionTimeout: 10000
+          connectTimeout: 10000
+          timeout: 3000
+          retryAttempts: 3
+          retryInterval: 1500
+          password: knowengine
+          subscriptionsPerConnection: 5
+          clientName: null
+          address: "redis://localhost:6379"
+          subscriptionConnectionMinimumIdleSize: 1
+          subscriptionConnectionPoolSize: 50
+          connectionMinimumIdleSize: 24
+          connectionPoolSize: 64
+          database: 0
+          dnsMonitoringInterval: 5000
+        threads: 16
+        nettyThreads: 32
+        codec: !<org.redisson.codec.JsonJacksonCodec> {}
+        transportMode: "NIO"
+
+# MyBatis-Plus 配置
+mybatis-plus:
+  configuration:
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  mapper-locations: classpath*:/mapper/**/*.xml
+
+langchain4j:
+  open-ai:
+    chat-model:
+      api-key: ${DASHSCOPE_API_KEY:not-configured}
+      # 模型名做成可配：不同账号在百炼「模型广场」开通的模型不一样，
+      # 写死会导致换账号就跑不起来：不同百炼账号开通的模型不同，模型名写死是常见事故源
+      model-name: ${CHAT_MODEL_NAME:qwen-plus}
+      base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      log-requests: true
+      log-responses: true
+    streaming-chat-model:
+      api-key: ${DASHSCOPE_API_KEY:not-configured}
+      model-name: ${CHAT_MODEL_NAME:qwen-plus}
+      base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      log-requests: true
+      log-responses: true
+  community:
+    neo4j:
+      await-index-timeout: 300
+      auth:
+        uri: bolt://localhost:7687
+        user: neo4j
+        password: neo4j666
+
+elasticsearch:
+  host: http://127.0.0.1:9200
+  base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model-name: text-embedding-v4
+  api-key: ${DASHSCOPE_API_KEY:not-configured}
+  dimensions: 1536
+
+minio:
+  url: http://localhost:9000 # 记得改成你自己的
+  accessKey: minioadmin # 记得改成你自己的
+  secretKey: minioadmin # 记得改成你自己的
+  bucketName: know-engine # 记得改成你自己的
+  endpoint: http://localhost:9000 # 记得改成你自己的
+
+neo4j:
+  uri: bolt://localhost:7687
+  username: neo4j
+  password: neo4j666
+
+# 文档解析服务（MinerU）配置
+# 只有上传 PDF / Word 才需要它；Excel / CSV / Markdown 走本地解析，不依赖该服务。
+# 需要 PDF 解析能力时请自行部署 MinerU 后通过环境变量指定地址。
+file:
+  parse:
+    api:
+      url: ${MINERU_API_URL:http://localhost:8000}
+
+# 检索配置
+know-engine:
+  # 模型配置。百炼账号之间开通的模型不同，全部做成可配 + 标准默认值
+  model:
+    # RAG 流式生成（质量优先）
+    rag: ${RAG_MODEL_NAME:qwen-plus}
+    # 异步标题生成（便宜快即可）
+    title: ${TITLE_MODEL_NAME:qwen-flash}
+  chat:
+    # 「我的车辆」门禁。开启后：网页端提问若被判为「售后维修与保养」或「车辆使用与技术指导」，
+    # 且用户名下没有车辆记录，会直接返回 [WARN] 提示而不进入检索（4S 店客服的选车流程）。
+    # 当前知识库是公开的产品资料与售后政策，提问不依赖「用户名下是否有车」，故默认关闭。
+    # 需要演示选车流程时改为 true 即可恢复原行为。
+    car-gate-enabled: false
+  retrieval:
+    # gate   = 主干（向量 ∥ 关键词）无条件并行 + 图/SQL 各自挂闸门叠加（默认）
+    # router = 回退到基于 LLM 的互斥路由（一次调用只选一路）。出问题时可一键切回
+    mode: gate
+    # 图闸门：true = 意图识别抽到实体才查图；false = 每次对话都查图
+    graph-gate-enabled: true
+    # 主干每路召回条数（粗排多捞、精排收敛）
+    pool-size: 20
+    # RRF 名次平滑常数
+    rrf-k: 60
+    # RRF 各路权重。两路分数量纲不同，只能按名次融合 + 按来源取权重。
+    # 具体数值要用评测集定，不要照抄通用场景
+    vector-weight: 0.7
+    keyword-weight: 0.3
+  # 文档后处理（主干向量化完成后异步执行）。图谱抽取未实现——汽车 KB 关系类问题少，
+  # per-chunk LLM 成本不划算，等真有"XX 和 YY 什么关系"的查询需求再上。
+  postprocess:
+    # 总开关
+    enabled: true
+    # 文档摘要 chunk（概览形态，概览型提问的召回抓手）
+    summary-enabled: true
+    # 问题生成 doc2query（问句形态，问答类提问的召回抓手；问题自带型号参数词，缓解数字失明）
+    question-enabled: true
+    # 每 chunk 生成的问题数（默认 3，封顶 10——防一个问题刷爆稀释索引）
+    questions-per-chunk: 3
+    questions-max: 10
+    # 每批送进 LLM 的 chunk 数（批内一次调用，批间独立检查取消）
+    question-batch-size: 5
+
+# XXL-Job 配置
+xxl:
+  job:
+    admin:
+      addresses: http://127.0.0.1:8080/xxl-job-admin # xxl-job-admin 地址，记得改成你自己的
+    accessToken: default_token
+    executor:
+      appname: know-engine-executor # 执行器名称
+
+# 钉钉机器人（可选功能：把同一个对话链路接到钉钉群/单聊）
+# 不配置也能正常启动，只是机器人回调收不到消息。三处都从环境变量读，密钥不进仓库。
+dingtalk:
+  appKey: ${DINGTALK_APP_KEY:}
+  appSecret: ${DINGTALK_APP_SECRET:}
+  robotCode: ${DINGTALK_ROBOT_CODE:${DINGTALK_APP_KEY:}}
+
+# Sa-Token 配置
+sa-token:
+  # token 名称（同时也是 Cookie 名称、Header 名称）
+  token-name: satoken
+  # token 有效期（秒），默认 30 天，-1 代表永久有效
+  timeout: 2592000
+  # token 最低活跃频率（秒），如果 token 超过这个时间没有访问系统就会被冻结，默认-1 代表不限制
+  active-timeout: -1
+  # 是否允许同一账号并发登录（为 true 时允许一起登录，为 false 时新登录会挤下旧登录）
+  is-concurrent: true
+  # 在多人登录同一账号时，是否共用一个 token（为 true 时所有登录共用一个 token，为 false 时每次登录新建一个 token）
+  is-share: true
+  # token 风格（uuid）
+  token-style: uuid
+  # 是否输出操作日志
+  is-log: false
+  # 是否从 cookie 中读取 token
+  is-read-cookie: true
+  # 是否从 header 中读取 token
+  is-read-header: true

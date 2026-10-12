@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiHome 知识引擎</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div class="auth-page">
+  <div style="text-align:center">
+    <div class="auth-logo" id="logo"></div>
+    <div style="font-size:15px;font-weight:600;margin-bottom:6px">MiHome 知识引擎</div>
+    <div class="hint" id="tip">正在检查登录状态…</div>
+    <div style="margin-top:18px">
+      <a class="btn" href="/login.html">用户登录</a>
+      <a class="btn" href="/staff-login.html">员工登录</a>
+    </div>
+  </div>
+</div>
+<script src="js/app.js"></script>
+<script>
+(function () {
+  KE.theme.init();
+  document.getElementById('logo').innerHTML = KE.svg('spark', 26);
+  KE.auth.load().then(function (u) {
+    if (u) {
+      document.getElementById('tip').textContent = '已登录，正在进入…';
+      location.href = '/chat.html';
+    } else {
+      document.getElementById('tip').textContent = '请先登录';
+    }
+  });
+})();
+</script>
+</body>
+</html>

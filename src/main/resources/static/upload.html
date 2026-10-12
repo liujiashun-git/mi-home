@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>上传文档 · MiHome 知识引擎</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<div class="page">
+  <div class="page-inner">
+
+    <div class="page-head">
+      <div class="avatar" style="border-radius:11px" id="navMark"></div>
+      <h1>上传文档</h1>
+      <div style="flex:1"></div>
+      <a class="btn" href="/chat.html">AI 对话</a>
+      <a class="btn" href="/document.html">文档管理</a>
+      <button class="icon-btn" data-theme-toggle></button>
+    </div>
+
+    <!-- ============ 1. 选文件 ============ -->
+    <div class="card" style="padding:20px;margin-bottom:16px">
+      <div style="font-size:15px;font-weight:620;margin-bottom:4px">1 · 选择文件</div>
+      <div class="hint" style="margin:0 0 14px">
+        支持 Excel / CSV / Markdown / TXT / HTML
+      </div>
+
+      <div class="drop" id="drop">
+        <div class="drop-mark" id="dropIcon"></div>
+        <b>点击选择文件，或将文件拖到此处</b>
+        <span>Excel（.xlsx / .xls）会走表格专用切分与表摘要生成</span>
+      </div>
+      <input type="file" id="file" hidden
+             accept=".xlsx,.xls,.csv,.md,.markdown,.txt,.html,.htm">
+
+      <div id="fileBox"></div>
+    </div>
+
+    <!-- ============ 2. 文档信息 ============ -->
+    <div class="card" style="padding:20px;margin-bottom:16px">
+      <div style="font-size:15px;font-weight:620;margin-bottom:14px">2 · 文档信息</div>
+
+      <div class="row">
+        <div class="field">
+          <label for="title">文档标题<span class="req">*</span></label>
+          <input class="input" id="title" placeholder="例如：小米汽车车型参数与质保政策">
+        </div>
+        <div class="field">
+          <label for="version">版本号</label>
+          <input class="input" id="version" value="1.0.0" placeholder="1.0.0">
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="description">文档描述<span class="req">*</span></label>
+        <textarea class="textarea" id="description"
+                  placeholder="简述文档内容，便于后续检索与维护"></textarea>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label for="knowledgeBaseType">知识库类型<span class="req">*</span></label>
+          <select class="select" id="knowledgeBaseType">
+            <option value="DOCUMENT_SEARCH" selected>文档搜索 — 切片入向量库，供 RAG 检索</option>
+            <option value="DATA_QUERY">数据查询 — 建物理表，供 Text2SQL 查询</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="accessibleBy">可见范围<span class="req">*</span></label>
+          <select class="select" id="accessibleBy">
+            <option value="VISITOR" selected>VISITOR — 所有人可见</option>
+            <option value="OWNER">OWNER — 客服 + 已购车用户</option>
+            <option value="CUSTOMER_SERVICE">CUSTOMER_SERVICE — 仅客服</option>
+          </select>
+          <div class="hint">权限由高到低：CUSTOMER_SERVICE &gt; OWNER &gt; VISITOR</div>
+        </div>
+      </div>
+
+      <div class="field" id="tableNameField" style="display:none">
+        <label for="tableName">数据表名称<span class="req">*</span></label>
+        <input class="input" id="tableName" placeholder="仅支持小写字母、数字与下划线">
+        <div class="hint">Excel 会解析为物理表，表名需符合 MySQL 命名规范</div>
+      </div>
+
+      <button class="btn btn-primary" id="btnUpload" style="margin-top:6px">
+        上传并入库
+      </button>
+      <div class="progress" id="upProgress" style="display:none"><i></i></div>
+    </div>
+
+    <!-- ============ 3. 切片 ============ -->
+    <div class="card" id="splitCard" style="padding:20px;display:none">
+      <div style="font-size:15px;font-weight:620;margin-bottom:4px">3 · 切片参数</div>
+      <div class="hint" style="margin:0 0 14px">
+        文档已入库，接下来将其切分为检索片段
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label for="splitType">切片方式<span class="req">*</span></label>
+          <select class="select" id="splitType">
+            <option value="SMART" selected>智能切分（SMART，推荐）</option>
+            <option value="TITLE">按标题切分（TITLE）</option>
+            <option value="LENGTH">按长度切分（LENGTH）</option>
+            <option value="SEPARATOR">按分隔符切分（SEPARATOR）</option>
+            <option value="REGEX">按正则切分（REGEX）</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="chunkSize">最大分段长度<span class="req">*</span></label>
+          <input class="input" id="chunkSize" type="number" min="1" value="500">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label for="overlap">重叠长度</label>
+          <input class="input" id="overlap" type="number" min="0" value="50">
+        </div>
+        <div class="field" id="titleLevelField">
+          <label for="titleLevel">切到几级标题</label>
+          <input class="input" id="titleLevel" type="number" min="1" max="6" value="3">
+        </div>
+        <div class="field" id="separatorField" style="display:none">
+          <label for="separator">分隔符</label>
+          <input class="input" id="separator" placeholder="例如：---">
+        </div>
+        <div class="field" id="regexField" style="display:none">
+          <label for="regex">正则表达式</label>
+          <input class="input" id="regex" placeholder="例如：##">
+        </div>
+      </div>
+
+      <button class="btn btn-primary" id="btnSplit">开始切片</button>
+    </div>
+
+    <div id="resultBox" style="margin-top:16px"></div>
+
+  </div>
+</div>
+
+<script src="js/app.js"></script>
+<script>
+(function () {
+  KE.theme.init();
+  document.getElementById('navMark').innerHTML = KE.svg('spark', 18);
+  document.querySelectorAll('[data-theme-toggle]').forEach(function (b) {
+    b.innerHTML = KE.svg(KE.theme.get() === 'dark' ? 'sun' : 'moon', 17);
+    b.addEventListener('click', KE.theme.toggle);
+  });
+
+  var drop = document.getElementById('drop');
+  var fileInput = document.getElementById('file');
+  var fileBox = document.getElementById('fileBox');
+  var resultBox = document.getElementById('resultBox');
+  var btnUpload = document.getElementById('btnUpload');
+  var upProgress = document.getElementById('upProgress');
+  var splitCard = document.getElementById('splitCard');
+  var btnSplit = document.getElementById('btnSplit');
+
+  var picked = null;
+  var uploadedDoc = null;
+
+  document.getElementById('dropIcon').innerHTML = KE.svg('upload', 22);
+  KE.auth.require();
+
+  /* ---------- 选文件 ---------- */
+  function setFile(f) {
+    picked = f || null;
+    if (!f) { fileBox.innerHTML = ''; return; }
+    fileBox.innerHTML =
+      '<div class="file-row">' + KE.svg('file', 16) +
+        '<span class="fname">' + KE.esc(f.name) + '</span>' +
+        '<span class="fsize">' + KE.bytes(f.size) + '</span>' +
+        '<button class="mini-btn" id="clearFile">移除</button>' +
+      '</div>';
+    document.getElementById('clearFile').addEventListener('click', function (e) {
+      e.stopPropagation();
+      fileInput.value = '';
+      setFile(null);
+    });
+    var t = document.getElementById('title');
+    if (!t.value) t.value = f.name.replace(/\.[^.]+$/, '');
+  }
+
+  drop.addEventListener('click', function () { fileInput.click(); });
+  fileInput.addEventListener('change', function () { setFile(fileInput.files[0]); });
+
+  ['dragenter', 'dragover'].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add('over'); });
+  });
+  ['dragleave', 'drop'].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove('over'); });
+  });
+  drop.addEventListener('drop', function (e) {
+    var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) setFile(f);
+  });
+
+  /* ---------- 联动 ---------- */
+  document.getElementById('knowledgeBaseType').addEventListener('change', function () {
+    document.getElementById('tableNameField').style.display = this.value === 'DATA_QUERY' ? '' : 'none';
+  });
+
+  function syncSplitFields() {
+    var v = document.getElementById('splitType').value;
+    document.getElementById('titleLevelField').style.display = v === 'TITLE' ? '' : 'none';
+    document.getElementById('separatorField').style.display = v === 'SEPARATOR' ? '' : 'none';
+    document.getElementById('regexField').style.display = v === 'REGEX' ? '' : 'none';
+  }
+  document.getElementById('splitType').addEventListener('change', syncSplitFields);
+  syncSplitFields();
+
+  function resultCard(type, title, body) {
+    var cls = type === 'ok' ? 'tag ok' : (type === 'err' ? 'tag danger' : 'tag warn');
+    var label = type === 'ok' ? '成功' : (type === 'err' ? '失败' : '提示');
+    return '<div class="card" style="padding:16px">' +
+      '<div class="' + cls + '" style="margin-bottom:9px">' + label + '</div>' +
+      '<div style="font-weight:600;margin-bottom:6px">' + KE.esc(title) + '</div>' +
+      '<div style="font-size:13px;color:var(--text-2);line-height:1.75">' + body + '</div>' +
+      '</div>';
+  }
+
+  /* ---------- 上传 ---------- */
+  btnUpload.addEventListener('click', async function () {
+    if (!picked) { KE.toast('请先选择文件', 'warn'); return; }
+
+    var title = document.getElementById('title').value.trim();
+    var desc = document.getElementById('description').value.trim();
+    var type = document.getElementById('knowledgeBaseType').value;
+    var accessibleBy = document.getElementById('accessibleBy').value;
+    var tableName = document.getElementById('tableName').value.trim();
+
+    if (!title) { KE.toast('请填写文档标题', 'warn'); return; }
+    if (!desc) { KE.toast('请填写文档描述', 'warn'); return; }
+    if (type === 'DATA_QUERY') {
+      if (!tableName) { KE.toast('数据查询类型必须填写数据表名称', 'warn'); return; }
+      if (!/^[a-z0-9_]+$/.test(tableName)) {
+        KE.toast('数据表名只能包含小写字母、数字与下划线', 'warn');
+        return;
+      }
+    }
+
+    var fd = new FormData();
+    fd.append('file', picked);
+    fd.append('title', title);
+    fd.append('description', desc);
+    fd.append('knowledgeBaseType', type);
+    fd.append('accessibleBy', accessibleBy);
+    fd.append('version', document.getElementById('version').value.trim() || '1.0.0');
+    if (type === 'DATA_QUERY') fd.append('tableName', tableName);
+
+    btnUpload.disabled = true;
+    btnUpload.textContent = '上传中…';
+    upProgress.style.display = '';
+    var bar = upProgress.querySelector('i');
+    bar.style.width = '0%';
+
+    try {
+      var doc = await KE.api.upload('/api/document/upload', fd, function (p) {
+        bar.style.width = p + '%';
+      });
+      uploadedDoc = doc;
+      bar.style.width = '100%';
+      KE.toast('上传成功', 'ok');
+
+      var info = '<strong>文档ID：</strong>' + KE.esc(doc.docId) +
+        '<br><strong>标题：</strong>' + KE.esc(doc.docTitle || title) +
+        '<br><strong>类型：</strong>' + KE.esc(doc.knowledgeBaseType || type);
+
+      if (String(doc.knowledgeBaseType) === 'DATA_QUERY') {
+        resultBox.innerHTML = resultCard('ok', '上传成功（数据查询）',
+          info + '<br><br>该文档已建为物理表，可直接被 Text2SQL 查询，<b>无需再做切片</b>。' +
+          '<br><br><a class="btn" href="/document.html">前往文档管理</a>');
+      } else {
+        resultBox.innerHTML = resultCard('ok', '上传成功，请继续切分', info);
+        splitCard.style.display = '';
+        splitCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    } catch (err) {
+      KE.toast('上传失败：' + err.message, 'err');
+      resultBox.innerHTML = resultCard('err', '上传失败', KE.esc(err.message));
+    } finally {
+      btnUpload.disabled = false;
+      btnUpload.textContent = '上传并入库';
+    }
+  });
+
+  /* ---------- 切片 ---------- */
+  btnSplit.addEventListener('click', async function () {
+    if (!uploadedDoc) { KE.toast('请先完成上传', 'warn'); return; }
+
+    var params = new URLSearchParams();
+    params.append('splitType', document.getElementById('splitType').value);
+    params.append('chunkSize', document.getElementById('chunkSize').value);
+    params.append('overlap', document.getElementById('overlap').value || '0');
+    params.append('titleLevel', document.getElementById('titleLevel').value || '3');
+    params.append('separator', document.getElementById('separator').value || '');
+    params.append('regex', document.getElementById('regex').value || '');
+
+    btnSplit.disabled = true;
+    btnSplit.textContent = '切片中…';
+
+    try {
+      var count = await KE.api.post('/api/document/split/' + uploadedDoc.docId + '?' + params.toString());
+      KE.toast('切片完成：' + count + ' 个片段', 'ok');
+      resultBox.innerHTML = resultCard('ok', '切片完成',
+        '<strong>文档ID：</strong>' + KE.esc(uploadedDoc.docId) +
+        '<br><strong>切片方式：</strong>' + KE.esc(params.get('splitType')) +
+        '<br><strong>片段数量：</strong>' + KE.esc(count) + ' 个' +
+        '<br><br><a class="btn" href="/document.html">前往文档管理</a>');
+      splitCard.style.display = 'none';
+    } catch (err) {
+      KE.toast('切片失败：' + err.message, 'err');
+      resultBox.innerHTML = resultCard('err', '切片失败', KE.esc(err.message));
+    } finally {
+      btnSplit.disabled = false;
+      btnSplit.textContent = '开始切片';
+    }
+  });
+})();
+</script>
+</body>
+</html>

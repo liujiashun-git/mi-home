@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · MiHome 知识引擎</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<div class="auth-page">
+  <div class="auth-card">
+    <div class="auth-logo" id="logo"></div>
+    <h1>欢迎回来</h1>
+    <div class="sub">登录 MiHome 知识引擎，开始智能问答</div>
+
+    <div class="auth-alert" id="alert"></div>
+
+    <form id="form" autocomplete="on">
+      <div class="field">
+        <label for="phone">手机号</label>
+        <input class="input" id="phone" type="tel" inputmode="numeric"
+               placeholder="请输入手机号" autocomplete="username" required>
+      </div>
+      <div class="field">
+        <label for="password">密码</label>
+        <input class="input" id="password" type="password"
+               placeholder="请输入密码" autocomplete="current-password" required>
+      </div>
+      <button class="btn btn-primary btn-block" id="submit" type="submit">
+        登录
+      </button>
+    </form>
+
+    <div class="auth-switch">
+      员工账号？<a href="/staff-login.html">切换到员工登录</a>
+    </div>
+  </div>
+</div>
+
+<script src="js/app.js"></script>
+<script>
+(function () {
+  KE.theme.init();
+  document.getElementById('logo').innerHTML = KE.svg('spark', 26);
+
+  var alertEl = document.getElementById('alert');
+  var btn = document.getElementById('submit');
+  var params = new URLSearchParams(location.search);
+  var redirect = params.get('redirect') || '/chat.html';
+
+  // 已登录则直接跳转
+  KE.auth.load().then(function (u) {
+    if (u) location.href = redirect;
+  });
+
+  document.getElementById('form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    KE.alertHide(alertEl);
+
+    var phone = document.getElementById('phone').value.trim();
+    var password = document.getElementById('password').value;
+
+    if (!/^\d{6,20}$/.test(phone)) {
+      return KE.alertBox(alertEl, '请输入正确的手机号');
+    }
+    if (!password) {
+      return KE.alertBox(alertEl, '请输入密码');
+    }
+
+    btn.disabled = true;
+    var old = btn.textContent;
+    btn.textContent = '登录中…';
+
+    try {
+      await KE.api.post('/auth/login', { phone: phone, password: password });
+      KE.toast('登录成功', 'ok');
+      setTimeout(function () { location.href = redirect; }, 260);
+    } catch (err) {
+      KE.alertBox(alertEl, err.message || '登录失败，请检查账号密码');
+      btn.disabled = false;
+      btn.textContent = old;
+    }
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>员工登录 · MiHome 知识引擎</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<div class="auth-page">
+  <div class="auth-card">
+    <div class="auth-logo" id="logo"></div>
+    <h1>员工登录</h1>
+    <div class="sub">知识库管理员入口 · 可上传与维护文档</div>
+
+    <div class="auth-alert" id="alert"></div>
+
+    <form id="form" autocomplete="on">
+      <div class="field">
+        <label for="empId">工号</label>
+        <input class="input" id="empId" type="text"
+               placeholder="请输入工号，如 TEST001" autocomplete="username" required>
+      </div>
+      <div class="field">
+        <label for="password">密码</label>
+        <input class="input" id="password" type="password"
+               placeholder="请输入密码" autocomplete="current-password" required>
+      </div>
+      <button class="btn btn-primary btn-block" id="submit" type="submit">
+        登录
+      </button>
+    </form>
+
+    <div class="auth-switch">
+      普通用户？<a href="/login.html">切换到用户登录</a>
+    </div>
+  </div>
+</div>
+
+<script src="js/app.js"></script>
+<script>
+(function () {
+  KE.theme.init();
+  document.getElementById('logo').innerHTML = KE.svg('user', 26);
+
+  var alertEl = document.getElementById('alert');
+  var btn = document.getElementById('submit');
+  var redirect = new URLSearchParams(location.search).get('redirect') || '/document.html';
+
+  KE.auth.load().then(function (u) {
+    if (u) location.href = redirect;
+  });
+
+  document.getElementById('form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    KE.alertHide(alertEl);
+
+    var empId = document.getElementById('empId').value.trim();
+    var password = document.getElementById('password').value;
+
+    if (!empId) return KE.alertBox(alertEl, '请输入工号');
+    if (!password) return KE.alertBox(alertEl, '请输入密码');
+
+    btn.disabled = true;
+    var old = btn.textContent;
+    btn.textContent = '登录中…';
+
+    try {
+      await KE.api.post('/auth/staffLogin', { empId: empId, password: password });
+      KE.toast('登录成功', 'ok');
+      setTimeout(function () { location.href = redirect; }, 260);
+    } catch (err) {
+      KE.alertBox(alertEl, err.message || '登录失败，请检查工号与密码');
+      btn.disabled = false;
+      btn.textContent = old;
+    }
+  });
+})();
+</script>
+</body>
+</html>
